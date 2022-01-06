@@ -1,4 +1,5 @@
 
+import os
 from threading import RLock, Condition
 import functools
 
@@ -7,11 +8,13 @@ from . import globals as GL
 
 __all__ = [
 	'new_thread', 'get_current_job', 'begin_job', 'after_job', 'new_job',
-	'join_rtext', 'send_block_message', 'send_message', 'broadcast_message', 'log_info'
+	'new_command', 'join_rtext', 'send_block_message', 'send_message', 'broadcast_message', 'log_info',
+	'get_total_size', 'format_size'
 ]
 
 def new_thread(call):
 	@MCDR.new_thread('smart_backup')
+	@functools.wraps(call)
 	def c(*args, **kwargs):
 		return call(*args, **kwargs)
 	return c
@@ -23,20 +26,20 @@ def get_current_job():
 	with job_lock:
 		return None if current_job is None else current_job[0]
 
-def check_job(job: str):
+def check_job():
 	with job_lock:
-		return current_job is None or current_job[0] == job
+		return current_job is None
 
 def begin_job(job: str = None, block=False):
 	global current_job, job_lock
-	if block or job is None or current_job is None or current_job[0] == job:
+	if block or job is None or current_job is None:
 		with job_lock:
 			while True:
 				if current_job is None:
 					assert job is not None
 					current_job = [job, 1]
 					return True
-				if job is None or current_job[0] == job:
+				if job is None:
 					current_job[1] += 1
 					return True
 				if not block:
@@ -58,7 +61,7 @@ def new_job(job: str):
 		@functools.wraps(call)
 		def c(*args, **kwargs):
 			with job_lock:
-				if not check_job(job) and len(args) > 0 and isinstance(args[0], MCDR.CommandSource):
+				if not check_job() and len(args) > 0 and isinstance(args[0], MCDR.CommandSource):
 					send_message(args[0], MCDR.RText('In progress {} now'.format(current_job[0]), color=MCDR.RColor.red))
 					return None
 				else:
@@ -69,6 +72,15 @@ def new_job(job: str):
 				after_job()
 		return c
 	return w
+
+def new_command(cmd: str, text=None, **kwargs):
+	if text is None:
+		text = cmd
+	if 'color' not in kwargs:
+		kwargs['color'] = MCDR.RColor.yellow
+	if 'styles' not in kwargs:
+		kwargs['styles'] = MCDR.RStyle.underlined
+	return MCDR.RText(text, **kwargs).c(MCDR.RAction.run_command, cmd)
 
 def join_rtext(*args, sep=' '):
 	return MCDR.RTextList(args[0], *(MCDR.RTextList(sep, a) for a in args[1:]))
@@ -95,3 +107,31 @@ def broadcast_message(*args, sep=' ', prefix=GL.MSG_ID):
 def log_info(*args, sep=' ', prefix=GL.MSG_ID):
 	if GL.SERVER_INS is not None:
 		GL.SERVER_INS.logger.info(join_rtext(prefix, *args, sep=sep))
+
+def get_total_size(path: str):
+	size = 0
+	for root, _, files in os.walk(path):
+		for f in files:
+			f = os.path.join(root, f)
+			size += os.stat(f).st_size
+	return size
+
+def format_size(size: int):
+	sz: float = float(size)
+	ut: str = 'B'
+	if sz >= 1000:
+		sz /= 1024
+		ut = 'KB'
+	if sz >= 1000:
+		sz /= 1024
+		ut = 'MB'
+	if sz >= 1000:
+		sz /= 1024
+		ut = 'GB'
+	if sz >= 1000:
+		sz /= 1024
+		ut = 'TB'
+	if sz >= 1000:
+		sz /= 1024
+		ut = 'PB'
+	return '{0:.2f}{1}'.format(sz, ut)

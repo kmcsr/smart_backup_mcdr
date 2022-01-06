@@ -269,13 +269,14 @@ class Backup:
 		return f
 
 	@classmethod
-	def create(cls, mode: BackupMode, comment: str, base: str, needs: list, ignores: list = []):
+	def create(cls, mode: BackupMode, comment: str, base: str, needs: list, ignores: list = [], prev: Backup = None):
 		timestamp: int = int(time.time() * 1000)
 		files: list = []
-		prev: Backup = None
 		l = set(os.listdir(base))
-		if mode != BackupMode.FULL:
-			prev = cls.get_last()
+		if mode == BackupMode.FULL:
+			if prev is not None:
+				prev = None
+		else:
 			assert prev is not None
 			if mode == BackupMode.DIFFERENTIAL:
 				while prev.mode != BackupMode.FULL:
@@ -330,6 +331,8 @@ class Backup:
 		rpath = os.path.realpath(path)
 		if rpath in cls._cache:
 			return cls._cache[rpath]
+		if not os.path.exists(path):
+			return None
 		mode: BackupMode
 		timestamp: int = int(os.path.basename(path), 16)
 		comment: str
@@ -358,6 +361,8 @@ class Backup:
 
 	@staticmethod
 	def list(path: str, limit: int = -1):
+		if not os.path.exists(path):
+			return list()
 		ids = sorted(map(lambda a: int(a, 16), filter(lambda a: a.startswith('0x'), os.listdir(path))))
 		if limit > 0:
 			ids = ids[-limit:]
@@ -365,6 +370,8 @@ class Backup:
 
 	@staticmethod
 	def get_last(path: str):
+		if not os.path.exists(path):
+			return None
 		ids = sorted(map(lambda a: int(a, 16), filter(lambda a: a.startswith('0x'), os.listdir(path))))
 		if len(ids) == 0:
 			return None
@@ -384,11 +391,12 @@ def _filter(ignore: str):
 	return call
 
 def filters(ignores: list):
+	ignorec = []
 	for i, s in enumerate(ignores):
-		ignores[i] = _filter(s)
+		ignorec.append(_filter(s))
 
 	def call(path: str):
-		for c in ignores:
+		for c in ignorec:
 			s = c(path)
 			if s == 1:
 				return False
