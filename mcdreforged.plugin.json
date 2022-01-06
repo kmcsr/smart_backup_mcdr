@@ -4,7 +4,7 @@
   "name": "SmartBackup",
   "description": "A Minecraft Backup Plugin",
   "author": "zyxkad",
-  "link": "https://github.com/zyxkad/smart_backup_mcdr",
+  "link": "https://github.com/kmcsr/smart_backup_mcdr",
   "dependencies": {
     "mcdreforged": ">=2.0.0"
   }
