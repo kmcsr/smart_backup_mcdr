@@ -235,6 +235,15 @@ class Backup:
 		return self._prev
 
 	@property
+	def z_index(self):
+		z = 0
+		prev = self._prev
+		while prev is not None:
+			prev = prev.prev
+			z += 1
+		return z
+
+	@property
 	def files(self):
 		return self._files.copy()
 

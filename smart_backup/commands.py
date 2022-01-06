@@ -57,7 +57,9 @@ def command_help(source: MCDR.CommandSource):
 	send_block_message(source, HelpMessage)
 
 def command_list_backup(source: MCDR.CommandSource, limit: int):
-	send_message(source, 'TODO: list "{}" backup'.format(limit))
+	bks = Backup.list(GL.Config.backup_path, limit)
+	lines = [MCDR.RText(b.z_index * '|' + hex(b.timestamp) + ': ' + b.comment) for b in bks]
+	send_block_message(source, *lines)
 
 @new_thread
 def command_query_backup(source: MCDR.CommandSource, bid: str):
@@ -97,6 +99,7 @@ def command_makefull(source: MCDR.CommandSource, comment: str):
 	server = source.get_server()
 
 	def call():
+		GL.Config.cache['differential_count'] = 0
 		backup = Backup.create(BackupMode.FULL, comment,
 			source.get_server().get_mcdr_config()['working_directory'], GL.Config.backup_needs, GL.Config.backup_ignores)
 		tuple(map(server.execute, GL.Config.after_backup))
