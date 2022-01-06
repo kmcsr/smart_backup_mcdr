@@ -1,0 +1,11 @@
+{
+  "id": "smart_backup",
+  "version": "0.0.1",
+  "name": "SmartBackup",
+  "description": "A Minecraft Backup Plugin",
+  "author": "zyxkad",
+  "link": "https://github.com/zyxkad/smart_backup_mcdr",
+  "dependencies": {
+    "mcdreforged": ">=2.0.0"
+  }
+}
