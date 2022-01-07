@@ -6,11 +6,13 @@ import mcdreforged.api.all as MCDR
 from .utils import *
 from . import globals as GL
 from .objects import *
+from . import api
 
 Prefix = '!!smb'
 
 HelpMessage = '''
 {0} help 显示帮助信息
+{0} status 显示插件状态
 {0} list [<limit>] 列出[所有/<limit>条]备份
 {0} query <id> 查询备份详细信息
 {0} make [<comment>] 创建新备份(差异/全盘)
@@ -37,6 +39,7 @@ def register(server: MCDR.PluginServerInterface):
 		MCDR.Literal(Prefix).
 		runs(command_help).
 		then(GL.Config.literal('help').runs(command_help)).
+		then(GL.Config.literal('status').runs(command_status)).
 		then(GL.Config.literal('list').
 			runs(lambda src: command_list_backup(src, 10)).
 			then(MCDR.Integer('limit').at_min(0).runs(lambda src, ctx: command_list_backup(src, ctx['limit'])))).
@@ -59,12 +62,30 @@ def register(server: MCDR.PluginServerInterface):
 def command_help(source: MCDR.CommandSource):
 	send_block_message(source, HelpMessage)
 
+def command_status(source: MCDR.CommandSource):
+	lb = Backup.get_last(GL.Config.backup_path)
+	lc = 'None' if lb is None else new_command(
+		'{0} restore {1}'.format(Prefix, hex(lb.timestamp)),
+		'{0}: {1}({2})'.format(hex(lb.timestamp),
+			time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(lb.timestamp / 1000)), lb.comment))
+	li = 0
+	for a in os.listdir(GL.Config.backup_path):
+		if a.startswith('0x'):
+			li += 1
+	send_block_message(source,
+		'备份文件夹: ' + GL.Config.backup_path,
+		'  大小: ' + format_size(get_total_size(GL.Config.backup_path)),
+		'  备份条数: ' + str(li),
+		'自动备份: ' + ('disabled' if api.backup_timer is None else 'enabled'),
+		join_rtext('最近一次备份:', lc)
+	)
+
 def command_list_backup(source: MCDR.CommandSource, limit: int):
 	bks = Backup.list(GL.Config.backup_path, limit)
 	lines = [MCDR.RTextList(b.z_index * '|',
 		new_command('{0} restore {1}'.format(Prefix, hex(b.timestamp)), hex(b.timestamp)),
 		': ' + b.comment) for b in bks]
-	send_block_message(source, *lines)
+	send_block_message(source, '最后{}条备份:'.format(len(bks)), *lines)
 
 @new_thread
 def command_query_backup(source: MCDR.CommandSource, bid: str):
@@ -90,59 +111,45 @@ def command_query_backup(source: MCDR.CommandSource, bid: str):
 @new_job('make backup')
 def command_make(source: MCDR.CommandSource, comment: str):
 	server = source.get_server()
-	send_message(source, 'Making backup "{}"'.format(comment), log=True)
-	tuple(map(server.execute, GL.Config.befor_backup))
-
-	def call():
-		prev: Backup = None
-		mode: BackupMode = BackupMode.FULL
-		if 'differential_count' not in GL.Config.cache or GL.Config.cache['differential_count'] >= GL.Config.differential_backup_limit:
-			GL.Config.cache['differential_count'] = 0
-		else:
-			prev = Backup.get_last(GL.Config.backup_path)
-			if prev is None:
-				GL.Config.cache['differential_count'] = 0
-			else:
-				GL.Config.cache['differential_count'] += 1
-				mode = BackupMode.DIFFERENTIAL
-		backup = Backup.create(mode, comment,
-			source.get_server().get_mcdr_config()['working_directory'], GL.Config.backup_needs, GL.Config.backup_ignores, prev=prev)
-		tuple(map(server.execute, GL.Config.after_backup))
-		send_message(source, 'Saving backup "{}"'.format(comment), log=True)
-		backup.save(GL.Config.backup_path)
-		send_message(source, 'Saved backup "{}"'.format(comment), log=True)
+	broadcast_message('Making backup "{}"'.format(comment))
+	
+	c = lambda: next_job(lambda: (
+		api.make_backup(source, comment), tuple(map(server.execute, GL.Config.after_backup))))
 
 	if len(GL.Config.start_backup_trigger_info) > 0:
 		begin_job()
 		global game_saved_callback
-		game_saved_callback = new_thread(lambda: (call(), after_job()))
+		game_saved_callback = new_thread(lambda: (c(), after_job()))
+		tuple(map(server.execute, GL.Config.befor_backup))
 	else:
-		call()
+		tuple(map(server.execute, GL.Config.befor_backup))
+		c()
 
 @new_thread
-@new_job('make full backup')
+@new_job('make backup')
 def command_makefull(source: MCDR.CommandSource, comment: str):
 	server = source.get_server()
+	broadcast_message('Making backup "{}"'.format(comment))
 
-	def call():
-		GL.Config.cache['differential_count'] = 0
-		backup = Backup.create(BackupMode.FULL, comment,
-			source.get_server().get_mcdr_config()['working_directory'], GL.Config.backup_needs, GL.Config.backup_ignores)
-		tuple(map(server.execute, GL.Config.after_backup))
-		send_message(source, 'Saving backup "{}"'.format(comment), log=True)
-		backup.save(GL.Config.backup_path)
-		send_message(source, 'Saved backup "{}"'.format(comment), log=True)
+	c = lambda: next_job(lambda: (
+		api.make_backup(source, comment, mode=BackupMode.FULL), tuple(map(server.execute, GL.Config.after_backup))))
 
-	begin_job()
-	global game_saved_callback
-	game_saved_callback = new_thread(lambda: (call(), after_job()))
-
-	send_message(source, 'Making full backup "{}"'.format(comment), log=True)
-	tuple(map(server.execute, GL.Config.befor_backup))
+	if len(GL.Config.start_backup_trigger_info) > 0:
+		begin_job()
+		global game_saved_callback
+		game_saved_callback = new_thread(lambda: (c(), after_job()))
+		tuple(map(server.execute, GL.Config.befor_backup))
+	else:
+		tuple(map(server.execute, GL.Config.befor_backup))
+		c()
 
 @new_thread
 @new_job('restore')
-def command_restore(source: MCDR.CommandSource, bid: str):
+def command_restore(source: MCDR.CommandSource, bid: str, force: bool = False):
+	if force:
+		api.restore_backup(source, bid)
+		return
+
 	if not bid.startswith('0x'):
 		bid = '0x' + bid
 	path = os.path.join(GL.Config.backup_path, bid)
@@ -152,7 +159,7 @@ def command_restore(source: MCDR.CommandSource, bid: str):
 		return
 	server = source.get_server()
 
-	def restore():
+	def pre_restore():
 		abort: bool = False
 		timeout: int = GL.Config.restore_timeout
 		def ab():
@@ -169,19 +176,12 @@ def command_restore(source: MCDR.CommandSource, bid: str):
 				return
 			timeout -= 1
 		confirm_map.pop(None, None)
+		next_job(lambda: api.restore_backup(source, bid))
 
-		broadcast_message('Stopping the server')
-		server.stop()
-		server.wait_for_start()
-		log_info('Restoring...')
-		bk.restore(server.get_mcdr_config()['working_directory'], GL.Config.backup_needs, GL.Config.backup_ignores)
-		log_info('Starting the server')
-		server.start()
-	
 	begin_job()
 	register_confirm(source.player if source.is_player else '',
-		new_thread(lambda: (restore(), after_job())),
-		lambda: (send_message(source, '已取消回档'), after_job()))
+		new_thread(lambda: (pre_restore(), after_job())),
+		lambda: (send_message(source, '已取消回档'), after_job()), timeout=15)
 	send_message(source, MCDR.RText('确认回档至 "{}" 吗?'.format(bk.comment)).
 		h('id: ' + hex(bk.timestamp),
 			'comment: ' + bk.comment,
@@ -201,7 +201,7 @@ def command_abort(source: MCDR.CommandSource):
 
 @new_thread
 def command_config_load(source: MCDR.CommandSource):
-	GL.Config = server.load_config_simple(target_class=GL.SMBConfig, source_to_reply=source)
+	GL.SMBConfig.load(source)
 
 @new_thread
 def command_config_save(source: MCDR.CommandSource):
@@ -210,10 +210,16 @@ def command_config_save(source: MCDR.CommandSource):
 
 confirm_map = {}
 
-def __warp_call(call):
+def __warp_call(call, c2=None):
 	def c(*b):
+		if c2 is not None:
+			c2()
 		return call(*b[:call.__code__.co_argcount])
 	return c
 
-def register_confirm(player: str, confirm_call, abort_call=lambda: 0):
-	confirm_map[player] = (__warp_call(confirm_call), __warp_call(abort_call))
+def register_confirm(player: str, confirm_call, abort_call=lambda: 0, timeout: int=None):
+	if timeout is not None:
+		tmc = new_timer(timeout, lambda: confirm_map.pop(player, (0, lambda: 0))[1]()).cancel
+	else:
+		tmc = lambda: 0
+	confirm_map[player] = (__warp_call(confirm_call, tmc), __warp_call(abort_call, tmc))

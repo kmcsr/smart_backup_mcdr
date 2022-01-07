@@ -16,7 +16,6 @@ class SMBConfig(MCDR.Serializable):
 	differential_backup_limit: int = 10
 	full_backup_limit: int = 10
 	backup_interval: int = 60 * 60 * 1 # 1 hours
-	last_backup_time: int = 0
 	restore_timeout: int = 30
 	backup_path: str = './smt_backups'
 	overwrite_path: str = './smt_backup_overwrite'
@@ -38,7 +37,7 @@ class SMBConfig(MCDR.Serializable):
 		'reload':   3,
 		'save':     3,
 	}
-	_cache: Dict[str, Any] = {}
+	cache: dict = {}
 
 	def test_backup_trigger(self, info: str):
 		if not hasattr(self, '__start_backup_trigger') or self.__start_backup_trigger_info != self.start_backup_trigger_info:
@@ -46,21 +45,38 @@ class SMBConfig(MCDR.Serializable):
 			self.__start_backup_trigger = re.compile(self.start_backup_trigger_info)
 		return self.__start_backup_trigger.fullmatch(info) is not None
 
-	@property
-	def cache(self):
-		return self._cache
-
 	def literal(self, literal: str):
 		lvl = self.minimum_permission_level.get(literal, 0)
 		return MCDR.Literal(literal).requires(lambda src: src.has_permission(lvl),
 			lambda: MCDR.RText(MSG_ID.to_plain_text() + ' 权限不足', color=MCDR.RColor.red))
 
+	@classmethod
+	def load(cls, source: MCDR.CommandSource = None):
+		global Config
+		cache = None
+		if Config is not None:
+			cache = Config.cache
+		Config = SERVER_INS.load_config_simple(target_class=cls, source_to_reply=source)
+		if cache is not None:
+			Config.cache = cache
+
 	def save(self):
 		SERVER_INS.save_config_simple(self)
 
 
-Config: SMBConfig = SMBConfig()
+Config: SMBConfig = None
 SERVER_INS: MCDR.PluginServerInterface = None
+
+on_load_callbacks = []
+on_unload_callbacks = []
+
+def on_load_call(call):
+	on_load_callbacks.append(call)
+	return call
+
+def on_unload_call(call):
+	on_unload_callbacks.append(call)
+	return call
 
 def init(server: MCDR.PluginServerInterface):
 	global SERVER_INS
@@ -69,10 +85,13 @@ def init(server: MCDR.PluginServerInterface):
 	metadata = server.get_self_metadata()
 	BIG_BLOCK_BEFOR = BIG_BLOCK_BEFOR.format(metadata.name, metadata.version)
 	BIG_BLOCK_AFTER = BIG_BLOCK_AFTER.format(metadata.name, metadata.version)
-	global Config
-	Config = server.load_config_simple(target_class=SMBConfig)
+	SMBConfig.load()
+	for c in on_load_callbacks:
+		c(server)
 
 def destory():
 	global SERVER_INS
 	Config.save()
+	for c in on_unload_callbacks:
+		c(SERVER_INS)
 	SERVER_INS = None

@@ -1,13 +1,13 @@
 
 import os
-from threading import RLock, Condition
+from threading import RLock, Condition, Timer
 import functools
 
 import mcdreforged.api.all as MCDR
 from . import globals as GL
 
 __all__ = [
-	'new_thread', 'get_current_job', 'begin_job', 'after_job', 'new_job',
+	'new_thread', 'get_current_job', 'begin_job', 'after_job', 'new_job', 'next_job', 'new_timer',
 	'new_command', 'join_rtext', 'send_block_message', 'send_message', 'broadcast_message', 'log_info',
 	'get_total_size', 'format_size'
 ]
@@ -60,6 +60,8 @@ def new_job(job: str):
 	def w(call):
 		@functools.wraps(call)
 		def c(*args, **kwargs):
+			if job_lock._is_owned():
+				return call(*args, **kwargs)
 			with job_lock:
 				if not check_job() and len(args) > 0 and isinstance(args[0], MCDR.CommandSource):
 					send_message(args[0], MCDR.RText('In progress {} now'.format(current_job[0]), color=MCDR.RColor.red))
@@ -73,6 +75,17 @@ def new_job(job: str):
 		return c
 	return w
 
+def next_job(call):
+	with job_lock:
+		call()
+
+def new_timer(interval, call, args: list=None, kwargs: dict=None, daemon: bool=True, name: str='smart_backup_timer'):
+	tm = Timer(interval, call, args=args, kwargs=kwargs)
+	tm.name = name
+	tm.daemon = daemon
+	tm.start()
+	return tm
+
 def new_command(cmd: str, text=None, **kwargs):
 	if text is None:
 		text = cmd
@@ -83,21 +96,24 @@ def new_command(cmd: str, text=None, **kwargs):
 	return MCDR.RText(text, **kwargs).c(MCDR.RAction.run_command, cmd)
 
 def join_rtext(*args, sep=' '):
+	if len(args) == 0:
+		return MCDR.RTextList()
+	if len(args) == 1:
+		return MCDR.RTextList(args[0])
 	return MCDR.RTextList(args[0], *(MCDR.RTextList(sep, a) for a in args[1:]))
 
 def send_block_message(source: MCDR.CommandSource, *args, sep='\n', log=False):
 	if source is not None:
 		t = join_rtext(GL.BIG_BLOCK_BEFOR, join_rtext(*args, sep=sep), GL.BIG_BLOCK_AFTER, sep='\n')
 		source.reply(t)
-		if log and not source.is_console:
+		if log and source.is_player:
 			source.get_server().logger.info(t)
-
 
 def send_message(source: MCDR.CommandSource, *args, sep=' ', prefix=GL.MSG_ID, log=False):
 	if source is not None:
 		t = join_rtext(prefix, *args, sep=sep)
 		source.reply(t)
-		if log and not source.is_console:
+		if log and source.is_player:
 			source.get_server().logger.info(t)
 
 def broadcast_message(*args, sep=' ', prefix=GL.MSG_ID):

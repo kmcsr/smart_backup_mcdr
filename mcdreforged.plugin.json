@@ -1,8 +1,11 @@
 {
   "id": "smart_backup",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "name": "SmartBackup",
-  "description": "A Minecraft Backup Plugin",
+  "description": {
+    "en_us": "A Minecraft Backup Plugin",
+    "zh_cn": "一个依赖MCDR的备份插件"
+  },
   "author": "zyxkad",
   "link": "https://github.com/kmcsr/smart_backup_mcdr",
   "dependencies": {
