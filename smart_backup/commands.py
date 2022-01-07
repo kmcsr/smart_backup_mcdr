@@ -18,21 +18,12 @@ HelpMessage = '''
 {0} make [<comment>] 创建新备份(差异/全盘)
 {0} makefull [<comment>] 创建全盘备份
 {0} rm <id> [force] 删除指定备份(及其子备份) #TODO
-{0} restore [<id>] 回档至[上次/指定id]备份
+{0} restore <id> [force] 回档至指定备份
 {0} confirm 确认操作
 {0} abort 取消操作
 {0} reload 重新加载配置文件
 {0} save 保存配置文件
 '''.strip().format(Prefix)
-
-game_saved_callback = None
-
-def on_info(server: MCDR.ServerInterface, info: MCDR.Info):
-	if not info.is_user:
-		global game_saved_callback
-		if game_saved_callback is not None and GL.Config.test_backup_trigger(info.content):
-			c, game_saved_callback = game_saved_callback, None
-			c()
 
 def register(server: MCDR.PluginServerInterface):
 	server.register_command(
@@ -52,7 +43,8 @@ def register(server: MCDR.PluginServerInterface):
 			runs(lambda src: command_makefull(src, 'None')).
 			then(MCDR.GreedyText('comment').runs(lambda src, ctx: command_makefull(src, ctx['comment'])))).
 		then(GL.Config.literal('restore').
-			then(MCDR.Text('id').runs(lambda src, ctx: command_restore(src, ctx['id'])))).
+			then(MCDR.Text('id').runs(lambda src, ctx: command_restore(src, ctx['id'])).
+				then(MCDR.Boolean('force').runs(lambda src, ctx: command_restore(src, ctx['id'], ctx['force']))))).
 		then(GL.Config.literal('confirm').runs(command_confirm)).
 		then(GL.Config.literal('abort').runs(command_abort)).
 		then(GL.Config.literal('reload').runs(command_config_load)).
@@ -62,29 +54,38 @@ def register(server: MCDR.PluginServerInterface):
 def command_help(source: MCDR.CommandSource):
 	send_block_message(source, HelpMessage)
 
+@new_thread
 def command_status(source: MCDR.CommandSource):
 	lb = Backup.get_last(GL.Config.backup_path)
 	lc = 'None' if lb is None else new_command(
-		'{0} restore {1}'.format(Prefix, hex(lb.timestamp)),
-		'{0}: {1}({2})'.format(hex(lb.timestamp),
-			time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(lb.timestamp / 1000)), lb.comment))
+		'{0} restore {1}'.format(Prefix, lb.id),
+		'{0}: {1}({2})'.format(lb.id, lb.strftime, lb.comment))
 	li = 0
-	for a in os.listdir(GL.Config.backup_path):
-		if a.startswith('0x'):
-			li += 1
+	bs = 0
+	if os.path.exists(GL.Config.backup_path):
+		for a in os.listdir(GL.Config.backup_path):
+			if a.startswith('0x'):
+				li += 1
+		bs = get_total_size(GL.Config.backup_path)
 	send_block_message(source,
 		'备份文件夹: ' + GL.Config.backup_path,
-		'  大小: ' + format_size(get_total_size(GL.Config.backup_path)),
+		'  大小: ' + format_size(bs),
 		'  备份条数: ' + str(li),
-		'自动备份: ' + ('disabled' if api.backup_timer is None else 'enabled'),
+		join_rtext('自动备份:', MCDR.RText('disabled' if api.backup_timer is None else 'enabled', color=MCDR.RColor.yellow)),
 		join_rtext('最近一次备份:', lc)
 	)
 
 def command_list_backup(source: MCDR.CommandSource, limit: int):
 	bks = Backup.list(GL.Config.backup_path, limit)
 	lines = [MCDR.RTextList(b.z_index * '|',
-		new_command('{0} restore {1}'.format(Prefix, hex(b.timestamp)), hex(b.timestamp)),
-		': ' + b.comment) for b in bks]
+		new_command('{0} restore {1}'.format(Prefix, b.id), b.id).h(join_rtext(
+			'ID: ' + b.id,
+			'Comment: ' + b.comment,
+			'Date: ' + b.strftime,
+			'Size: ' + format_size(get_total_size(os.path.join(GL.Config.backup_path, b.id))),
+			sep='\n')),
+		': ' + b.comment)
+	for b in bks]
 	send_block_message(source, '最后{}条备份:'.format(len(bks)), *lines)
 
 @new_thread
@@ -96,14 +97,13 @@ def command_query_backup(source: MCDR.CommandSource, bid: str):
 	if bk is None:
 		send_message(source, MCDR.RText('Cannot find backup with id "{}"'.format(bid)))
 		return
-	bk_size = get_total_size(path)
 	send_block_message(source,
-		'ID: ' + hex(bk.timestamp),
+		'ID: ' + bk.id,
 		'Comment: ' + bk.comment,
-		'Date: ' + time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(bk.timestamp / 1000)),
-		'Size: ' + format_size(bk_size),
+		'Date: ' + bk.strftime,
+		'Size: ' + format_size(get_total_size(path)),
 		join_rtext(
-			new_command('{0} restore {1}'.format(Prefix, hex(bk.timestamp)), '[回档]')
+			new_command('{0} restore {1}'.format(Prefix, bk.id), '[回档]')
 		)
 	)
 
@@ -112,18 +112,8 @@ def command_query_backup(source: MCDR.CommandSource, bid: str):
 def command_make(source: MCDR.CommandSource, comment: str):
 	server = source.get_server()
 	broadcast_message('Making backup "{}"'.format(comment))
-	
-	c = lambda: next_job(lambda: (
-		api.make_backup(source, comment), tuple(map(server.execute, GL.Config.after_backup))))
 
-	if len(GL.Config.start_backup_trigger_info) > 0:
-		begin_job()
-		global game_saved_callback
-		game_saved_callback = new_thread(lambda: (c(), after_job()))
-		tuple(map(server.execute, GL.Config.befor_backup))
-	else:
-		tuple(map(server.execute, GL.Config.befor_backup))
-		c()
+	next_job(api.make_backup, source, comment)
 
 @new_thread
 @new_job('make backup')
@@ -131,17 +121,7 @@ def command_makefull(source: MCDR.CommandSource, comment: str):
 	server = source.get_server()
 	broadcast_message('Making backup "{}"'.format(comment))
 
-	c = lambda: next_job(lambda: (
-		api.make_backup(source, comment, mode=BackupMode.FULL), tuple(map(server.execute, GL.Config.after_backup))))
-
-	if len(GL.Config.start_backup_trigger_info) > 0:
-		begin_job()
-		global game_saved_callback
-		game_saved_callback = new_thread(lambda: (c(), after_job()))
-		tuple(map(server.execute, GL.Config.befor_backup))
-	else:
-		tuple(map(server.execute, GL.Config.befor_backup))
-		c()
+	next_job(api.make_backup, source, comment, mode=BackupMode.FULL)
 
 @new_thread
 @new_job('restore')
@@ -165,7 +145,7 @@ def command_restore(source: MCDR.CommandSource, bid: str, force: bool = False):
 		def ab():
 			nonlocal abort
 			abort = True
-		date = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(bk.timestamp / 1000))
+		date = bk.strftime
 		register_confirm(None, lambda:0, ab)
 		while timeout > 0:
 			broadcast_message('{t} 秒后将重启回档至{date}({comment}), 输入'.format(t=timeout, date=date, comment=bk.comment),
@@ -183,9 +163,9 @@ def command_restore(source: MCDR.CommandSource, bid: str, force: bool = False):
 		new_thread(lambda: (pre_restore(), after_job())),
 		lambda: (send_message(source, '已取消回档'), after_job()), timeout=15)
 	send_message(source, MCDR.RText('确认回档至 "{}" 吗?'.format(bk.comment)).
-		h('id: ' + hex(bk.timestamp),
+		h('id: ' + bk.id,
 			'comment: ' + bk.comment,
-			'date: ' + time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(bk.timestamp / 1000)),
+			'date: ' + bk.strftime,
 			'size: ' + format_size(get_total_size(path))))
 	send_message(source, '输入', new_command('{} confirm'.format(Prefix)), '确认, 输入',
 		new_command('{} abort'.format(Prefix)), '取消')

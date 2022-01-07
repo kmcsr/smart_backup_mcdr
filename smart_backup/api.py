@@ -11,6 +11,15 @@ __all__ = [
 	'make_backup', 'restore_backup'
 ]
 
+game_saved_callback = None
+
+def on_info(server: MCDR.ServerInterface, info: MCDR.Info):
+	if not info.is_user:
+		global game_saved_callback
+		if game_saved_callback is not None and GL.Config.test_backup_trigger(info.content):
+			c, game_saved_callback = game_saved_callback, None
+			c()
+
 backup_timer = None
 
 def cancel_backup_timer():
@@ -54,24 +63,40 @@ def on_unload(server: MCDR.PluginServerInterface):
 def make_backup(source: MCDR.CommandSource, comment: str, mode: BackupMode = None):
 	cancel_backup_timer()
 	server = source.get_server()
-	prev: Backup = None
-	if mode is None:
-		mode = BackupMode.FULL
-		if 'differential_count' not in GL.Config.cache or GL.Config.cache['differential_count'] >= GL.Config.differential_backup_limit:
-			GL.Config.cache['differential_count'] = 0
-		else:
-			prev = Backup.get_last(GL.Config.backup_path)
-			if prev is None:
+	start_time = time.time()
+	tuple(map(server.execute, GL.Config.befor_backup))
+	def c():
+		nonlocal mode
+		prev: Backup = None
+		if mode is None:
+			mode = BackupMode.FULL
+			if 'differential_count' not in GL.Config.cache or GL.Config.cache['differential_count'] >= GL.Config.differential_backup_limit:
 				GL.Config.cache['differential_count'] = 0
 			else:
-				GL.Config.cache['differential_count'] += 1
-				mode = BackupMode.DIFFERENTIAL
-	backup = Backup.create(mode, comment,
-		source.get_server().get_mcdr_config()['working_directory'], GL.Config.backup_needs, GL.Config.backup_ignores, prev=prev)
-	send_message(source, 'Saving backup "{}"'.format(comment), log=True)
-	backup.save(GL.Config.backup_path)
-	send_message(source, 'Saved backup "{}"'.format(comment), log=True)
-	_flush_backup_timer()
+				prev = Backup.get_last(GL.Config.backup_path)
+				if prev is None:
+					GL.Config.cache['differential_count'] = 0
+				else:
+					GL.Config.cache['differential_count'] += 1
+					mode = BackupMode.DIFFERENTIAL
+		backup = Backup.create(mode, comment,
+			source.get_server().get_mcdr_config()['working_directory'], GL.Config.backup_needs, GL.Config.backup_ignores, prev=prev)
+		send_message(source, 'Saving backup "{}"'.format(comment), log=True)
+		backup.save(GL.Config.backup_path)
+		send_message(source, 'Saved backup "{}"'.format(comment), log=True)
+		tuple(map(server.execute, GL.Config.after_backup))
+		used_time = time.time() - start_time
+		broadcast_message('Backup finished, use {:.2f} sec'.format(used_time))
+		_flush_backup_timer()
+
+	if len(GL.Config.start_backup_trigger_info) > 0:
+		begin_job()
+		global game_saved_callback
+		game_saved_callback = new_thread(lambda: (c(), after_job()))
+		tuple(map(server.execute, GL.Config.befor_backup))
+	else:
+		tuple(map(server.execute, GL.Config.befor_backup))
+		c()
 
 @new_job('restore')
 def restore_backup(source: MCDR.CommandSource, bid: str):

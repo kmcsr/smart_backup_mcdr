@@ -61,6 +61,8 @@ def new_job(job: str):
 		@functools.wraps(call)
 		def c(*args, **kwargs):
 			if job_lock._is_owned():
+				if current_job is not None:
+					current_job[0] = job
 				return call(*args, **kwargs)
 			with job_lock:
 				if not check_job() and len(args) > 0 and isinstance(args[0], MCDR.CommandSource):
@@ -75,9 +77,9 @@ def new_job(job: str):
 		return c
 	return w
 
-def next_job(call):
+def next_job(call, *args, **kwargs):
 	with job_lock:
-		call()
+		call(*args, **kwargs)
 
 def new_timer(interval, call, args: list=None, kwargs: dict=None, daemon: bool=True, name: str='smart_backup_timer'):
 	tm = Timer(interval, call, args=args, kwargs=kwargs)
@@ -93,7 +95,7 @@ def new_command(cmd: str, text=None, **kwargs):
 		kwargs['color'] = MCDR.RColor.yellow
 	if 'styles' not in kwargs:
 		kwargs['styles'] = MCDR.RStyle.underlined
-	return MCDR.RText(text, **kwargs).c(MCDR.RAction.run_command, cmd)
+	return MCDR.RText(text, **kwargs).c(MCDR.RAction.run_command, cmd).h(cmd)
 
 def join_rtext(*args, sep=' '):
 	if len(args) == 0:

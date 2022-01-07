@@ -223,8 +223,16 @@ class Backup:
 		return self._mode
 
 	@property
+	def id(self):
+		return hex(self._timestamp)
+
+	@property
 	def timestamp(self):
-		return self._timestamp
+		return self._timestamp / 1000
+
+	@property
+	def strftime(self):
+		return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(self.timestamp))
 
 	@property
 	def comment(self):
@@ -320,7 +328,7 @@ class Backup:
 			comment = self._comment.encode('utf8')
 			fd.write(
 				self._mode.to_bytes(1, byteorder='big') +
-				(0 if self._prev is None else self._prev.timestamp).to_bytes(8, byteorder='big') +
+				int(0 if self._prev is None else self._prev.timestamp * 1000).to_bytes(8, byteorder='big') +
 				len(comment).to_bytes(2, byteorder='big'))
 			fd.write(comment)
 		for f in self._files.values():

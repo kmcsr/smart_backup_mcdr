@@ -29,9 +29,11 @@ class SMBConfig(MCDR.Serializable):
 		'help':     0,
 		'status':   1,
 		'list':     1,
+		'query':    1,
 		'make':     2,
 		'makefull': 3,
-		'back':     3,
+		'rm':       3,
+		'restore':  3,
 		'confirm':  1,
 		'abort':    1,
 		'reload':   3,
@@ -46,7 +48,7 @@ class SMBConfig(MCDR.Serializable):
 		return self.__start_backup_trigger.fullmatch(info) is not None
 
 	def literal(self, literal: str):
-		lvl = self.minimum_permission_level.get(literal, 0)
+		lvl = self.minimum_permission_level.get(literal, 4)
 		return MCDR.Literal(literal).requires(lambda src: src.has_permission(lvl),
 			lambda: MCDR.RText(MSG_ID.to_plain_text() + ' 权限不足', color=MCDR.RColor.red))
 

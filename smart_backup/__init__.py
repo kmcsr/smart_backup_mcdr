@@ -3,6 +3,7 @@ import mcdreforged.api.all as MCDR
 from .utils import *
 from . import globals as GL
 from . import commands as CMD
+from . import api
 
 def on_load(server: MCDR.PluginServerInterface, prev_module):
 	if prev_module is None:
@@ -17,4 +18,4 @@ def on_unload(server: MCDR.PluginServerInterface):
 	GL.destory()
 
 def on_info(server: MCDR.ServerInterface, info: MCDR.Info):
-  CMD.on_info(server, info)
+  api.on_info(server, info)
