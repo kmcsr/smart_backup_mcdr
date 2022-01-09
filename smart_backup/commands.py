@@ -13,12 +13,12 @@ Prefix = '!!smb'
 HelpMessage = '''
 {0} help 显示帮助信息
 {0} status 显示插件状态
-{0} list [<limit>] 列出[所有/<limit>条]备份
+{0} list [<limit> = 10] 列出<limit>条备份
 {0} query <id> 查询备份详细信息
-{0} make [<comment>] 创建新备份(差异/全盘)
-{0} makefull [<comment>] 创建全盘备份
-{0} rm <id> [force] 删除指定备份(及其子备份) #TODO
-{0} restore <id> [force] 回档至指定备份
+{0} make [<comment> = 'None'] 创建新备份(差异/全盘)
+{0} makefull [<comment> = 'None'] 创建全盘备份
+{0} rm <id> [<force> = false] 删除指定备份(及其子备份) #TODO
+{0} restore <id> [<force> = false] 回档至指定备份
 {0} confirm 确认操作
 {0} abort 取消操作
 {0} reload 重新加载配置文件
@@ -75,6 +75,7 @@ def command_status(source: MCDR.CommandSource):
 		join_rtext('最近一次备份:', lc)
 	)
 
+@new_thread
 def command_list_backup(source: MCDR.CommandSource, limit: int):
 	bks = Backup.list(GL.Config.backup_path, limit)
 	lines = [MCDR.RTextList(b.z_index * '|',

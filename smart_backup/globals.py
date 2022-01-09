@@ -13,7 +13,8 @@ BIG_BLOCK_BEFOR = '------------ {0} v{1} ::::'
 BIG_BLOCK_AFTER = ':::: {0} v{1} ============'
 
 class SMBConfig(MCDR.Serializable):
-	differential_backup_limit: int = 10
+	incremental_backup_limit: int = 12
+	differential_backup_limit: int = 6
 	full_backup_limit: int = 10
 	backup_interval: int = 60 * 60 * 1 # 1 hours
 	restore_timeout: int = 30

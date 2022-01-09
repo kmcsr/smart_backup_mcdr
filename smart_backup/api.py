@@ -42,11 +42,7 @@ def _timed_make_backup():
 	source = GL.SERVER_INS.get_plugin_command_source()
 	cmt = 'SMB timed backup: ' + time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
 	broadcast_message('Making backup "{}"'.format(cmt))
-	try:
-		make_backup(source, cmt)
-	finally:
-		if backup_timer is None:
-			_flush_backup_timer()
+	make_backup(source, cmt)
 
 @GL.on_load_call
 def on_load(server: MCDR.PluginServerInterface):
@@ -67,18 +63,29 @@ def make_backup(source: MCDR.CommandSource, comment: str, mode: BackupMode = Non
 	tuple(map(server.execute, GL.Config.befor_backup))
 	def c():
 		nonlocal mode
-		prev: Backup = None
+		prev: Backup = Backup.get_last(GL.Config.backup_path)
 		if mode is None:
 			mode = BackupMode.FULL
-			if 'differential_count' not in GL.Config.cache or GL.Config.cache['differential_count'] >= GL.Config.differential_backup_limit:
-				GL.Config.cache['differential_count'] = 0
-			else:
-				prev = Backup.get_last(GL.Config.backup_path)
-				if prev is None:
+			if 'incremental_count' not in GL.Config.cache or \
+				GL.Config.cache['incremental_count'] >= GL.Config.incremental_backup_limit:
+				GL.Config.cache['incremental_count'] = 0
+				if 'differential_count' not in GL.Config.cache or \
+					GL.Config.cache['differential_count'] >= GL.Config.differential_backup_limit:
 					GL.Config.cache['differential_count'] = 0
 				else:
-					GL.Config.cache['differential_count'] += 1
-					mode = BackupMode.DIFFERENTIAL
+					if prev is None:
+						GL.Config.cache['differential_count'] = 0
+					else:
+						GL.Config.cache['differential_count'] += 1
+						mode = BackupMode.DIFFERENTIAL
+			else:
+				if prev is None:
+					GL.Config.cache['incremental_count'] = 0
+				else:
+					GL.Config.cache['incremental_count'] += 1
+					mode = BackupMode.INCREMENTAL
+		if mode == BackupMode.FULL:
+			prev = None
 		backup = Backup.create(mode, comment,
 			source.get_server().get_mcdr_config()['working_directory'], GL.Config.backup_needs, GL.Config.backup_ignores, prev=prev)
 		send_message(source, 'Saving backup "{}"'.format(comment), log=True)
