@@ -1,8 +1,12 @@
 
 import re
+import os
+import json
 from typing import List, Dict, Any
 
 import mcdreforged.api.all as MCDR
+
+from .objects import *
 
 __all__ = [
 	'MSG_ID', 'BIG_BLOCK_BEFOR', 'BIG_BLOCK_AFTER', 'SMBConfig', 'Config', 'SERVER_INS', 'init', 'destory'
@@ -14,8 +18,9 @@ BIG_BLOCK_AFTER = ':::: {0} v{1} ============'
 
 class SMBConfig(MCDR.Serializable):
 	incremental_backup_limit: int = 12
-	differential_backup_limit: int = 6
-	full_backup_limit: int = 10
+	differential_backup_limit: int = 8
+	full_backup_limit: int = 8
+	full_backup_clean_indexs: List[int] = [1, 2, 2, 3, 3, 3, 0]
 	backup_interval: int = 60 * 60 * 1 # 1 hours
 	restore_timeout: int = 30
 	backup_path: str = './smt_backups'
@@ -40,7 +45,6 @@ class SMBConfig(MCDR.Serializable):
 		'reload':   3,
 		'save':     3,
 	}
-	cache: dict = {}
 
 	def test_backup_trigger(self, info: str):
 		if not hasattr(self, '__start_backup_trigger') or self.__start_backup_trigger_info != self.start_backup_trigger_info:
@@ -51,23 +55,52 @@ class SMBConfig(MCDR.Serializable):
 	def literal(self, literal: str):
 		lvl = self.minimum_permission_level.get(literal, 4)
 		return MCDR.Literal(literal).requires(lambda src: src.has_permission(lvl),
-			lambda: MCDR.RText(MSG_ID.to_plain_text() + ' 权限不足', color=MCDR.RColor.red))
+			lambda: MCDR.RTextList(MSG_ID, MCDR.RText(' permission denied', color=MCDR.RColor.red)))
+
+	@property
+	def cache(self):
+		return self._cache
+
+	@cache.setter
+	def cache(self, cache):
+		assert isinstance(cache, dict)
+		self._cache = cache
+
+	def get_next_clean_index(self):
+		if 'clean_II' not in self.cache or self.cache['clean_II'] >= len(self.full_backup_clean_indexs):
+			self.cache['clean_II'] = 0
+		ind: int = self.full_backup_clean_indexs[self.cache['clean_II']]
+		self.cache['clean_II'] = (self.cache['clean_II'] + 1) % len(self.full_backup_clean_indexs)
+		return ind
 
 	@classmethod
 	def load(cls, source: MCDR.CommandSource = None):
-		global Config
-		cache = None
-		if Config is not None:
-			cache = Config.cache
+		global Config, Manager
+		cache: dict = {}
+		oldConfig: SMBConfig = Config
 		Config = SERVER_INS.load_config_simple(target_class=cls, source_to_reply=source)
-		if cache is not None:
-			Config.cache = cache
+		cf: str = os.path.join(Config.backup_path, 'cache.json')
+		if os.path.exists(cf):
+			with open(cf, 'r') as fd:
+				try:
+					cache = json.load(fd)
+				except Exception as e:
+					cache = {} if oldConfig is None else oldConfig.cache
+		Config.cache = cache
+		if oldConfig is None or oldConfig.backup_path != Config.backup_path:
+			Manager = BackupManager(Config.backup_path)
 
 	def save(self):
 		SERVER_INS.save_config_simple(self)
+		Manager.savecfg()
+		if not os.path.exists(self.backup_path):
+			os.makedirs(self.backup_path)
+		with open(os.path.join(self.backup_path, 'cache.json'), 'w') as fd:
+			json.dump(self._cache, fd, indent=4, separators=(', ', ': '), sort_keys=True)
 
 
 Config: SMBConfig = None
+Manager: BackupManager = None
 SERVER_INS: MCDR.PluginServerInterface = None
 
 on_load_callbacks = []
@@ -93,8 +126,10 @@ def init(server: MCDR.PluginServerInterface):
 		c(server)
 
 def destory():
-	global SERVER_INS
-	Config.save()
+	global SERVER_INS, Manager
+	if Config is not None:
+		Config.save()
+	Manager = None
 	for c in on_unload_callbacks:
 		c(SERVER_INS)
 	SERVER_INS = None

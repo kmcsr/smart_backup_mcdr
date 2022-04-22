@@ -1,16 +1,24 @@
 
 import io
 import os
+import shutil
 import time
 import enum
 import hashlib
 import weakref
 import queue
-import threading
+import json
 
 __all__ = [
-	'ModifiedType', 'BackupMode', 'BackupFile', 'BackupDir', 'Backup'
+	'BackupNotFoundError',
+	'ModifiedType', 'BackupMode',
+	'BackupFile', 'BackupDir', 'Backup',
+	'BackupIndex', 'BackupManager'
 ]
+
+class BackupNotFoundError(FileNotFoundError):
+	def __init__(self, *args, **kwargs):
+		super().__init__(*args, **kwargs)
 
 class ModifiedType(int, enum.Enum):
 	UNKNOWN = 0
@@ -22,45 +30,20 @@ class BackupMode(int, enum.Enum):
 	INCREMENTAL = 1
 	DIFFERENTIAL = 2
 
-builtin_open = open
-flock = threading.Condition(threading.Lock())
-fopened = 0
-def open(file, *args, **kwargs):
-	global fopened
-	with flock:
-		while True:
-			try:
-				fd = builtin_open(file, *args, **kwargs)
-				break
-			except OSError as e:
-				if e.errno == 24:
-					flock.wait()
-					continue
-				raise
-		fopened += 1
-	c = fd.close
-	def m():
-		global fopened
-		with flock:
-			fopened -= 1
-			flock.notify()
-		fd.close = c
-		return fd.close()
-	fd.close = m
-	return fd
-
 class BackupFile: pass
 class BackupDir: pass
 class Backup: pass
+class BackupManager: pass
 
 class BackupFile:
-	def __init__(self, type_: ModifiedType, name: str, mode: int, data: bytes = None, path: str = None, offset: int = -1, hash_: bytes = None):
+	def __init__(self, type_: ModifiedType, name: str, mode: int, data: bytes = None, path: str = None, offset: int = -1, safety: bool = False, hash_: bytes = None):
 		self._type = type_
 		self._name = name
 		self._mode = mode
 		self._data = data
 		self._path = path
 		self._offset = offset
+		self._safety_data = safety
 		self._hash = hash_
 
 	@property
@@ -80,8 +63,13 @@ class BackupFile:
 		if self._mode == ModifiedType.REMOVE:
 			return None
 		if self._hash is None:
-			self._hash = calchash(self.data)
+			with self.data_file as rd:
+				self._hash = calchash(rd)
 		return self._hash
+
+	@property
+	def safety_data(self):
+		return self._safety_data
 
 	@property
 	def data(self):
@@ -91,7 +79,23 @@ class BackupFile:
 			return self._data
 		if self._path is not None:
 			try:
-				fd = open(self._path, 'rb')
+				with open(self._path, 'rb', 8192) as fd:
+					fd.seek(self._offset)
+					return fd.read()
+			except FileNotFoundError:
+				raise
+			except Exception as err:
+				raise RuntimeError(f'Error when open {self._path}', err)
+
+	@property
+	def data_file(self):
+		if self._type == ModifiedType.REMOVE:
+			return None
+		if self._data is not None:
+			return io.BytesIO(self._data)
+		if self._path is not None:
+			try:
+				fd = open(self._path, 'rb', 8192)
 				fd.seek(self._offset)
 				return fd
 			except FileNotFoundError:
@@ -103,7 +107,7 @@ class BackupFile:
 		return None
 
 	@classmethod
-	def _create(cls, path: str, *pt, filterc=lambda *a, **b: True, prev: Backup = None):
+	def create(cls, path: str, *pt, filterc=lambda *a, **b: True, prev: Backup = None):
 		type_: ModifiedType
 		name: str = pt[-1]
 		mode: int
@@ -115,7 +119,7 @@ class BackupFile:
 				pref = prev.get(*pt)
 				if isinstance(pref, cls) and mode == pref.mode:
 					try:
-						hash_ = calchash(open(path, 'rb'))
+						hash_ = calchash(open(path, 'rb', 8192))
 						if hash_ == pref.hash:
 							return None
 					except FileNotFoundError:
@@ -127,43 +131,23 @@ class BackupFile:
 			mode = 0
 		return cls(type_=type_, name=name, mode=mode, path=path, offset=0, hash_=hash_)
 
-	@classmethod
-	def create(cls, path: str, *pt, filterc=lambda *a, **b: True, prev: Backup = None, async_: bool = True, callback=None):
-		def c():
-			o = cls._create(path, *pt, filterc=filterc, prev=prev)
-			if callback is not None and o is not None:
-				callback(o)
-			return o
-		if async_:
-			t = threading.Thread(target=c, name='smart_backup_helper')
-			t.start()
-			return t
-		return c()
-
 	def restore(self, path: str):
 		try:
-			with open(path, 'wb') as wd:
-				writetofile(self.data, wd)
+			with open(path, 'wb', 8192) as wd, self.data_file as rd:
+				writetofile(rd, wd)
 		except Exception as err:
 			raise RuntimeError(f'Error when restore {path}', err)
 
-	def _save(self, path: str):
+	def save(self, path: str):
 		path = os.path.join(path, self._name + '.F')
-		with open(path, 'wb') as fd:
+		with open(path, 'wb', 8192) as fd:
 			fd.write(self._type.to_bytes(1, byteorder='big'))
 			if self._type != ModifiedType.REMOVE:
 				fd.write(self._mode.to_bytes(2, byteorder='big'))
 				fd.write(self.hash)
-				writetofile(self.data, fd)
-
-				self._path, self._offset = path, 35
-
-	def save(self, path: str, *, async_: bool = True):
-		if async_:
-			t = threading.Thread(target=self._save, name='smart_backup_helper', args=[path])
-			t.start()
-			return t
-		return self._save(path)
+				with self.data_file as rd:
+					writetofile(rd, fd)
+		self._path, self._offset = path, 35
 
 	@classmethod
 	def load(cls, path: str, prev: BackupFile = None):
@@ -171,21 +155,22 @@ class BackupFile:
 		name: str = os.path.splitext(os.path.basename(path))[0]
 		mode: int
 		hash_: bytes = None
-		with open(path, 'rb') as fd:
+		with open(path, 'rb', 36) as fd:
 			type_ = ModifiedType(int.from_bytes(fd.read(1), byteorder='big'))
 			if type_ == ModifiedType.REMOVE:
 				mode = 0
 			else:
 				mode = int.from_bytes(fd.read(2), byteorder='big')
 				hash_ = fd.read(32)
-		return cls(type_=type_, name=name, mode=mode, path=path, offset=35, hash_=hash_)
+		return cls(type_=type_, name=name, mode=mode, path=path, offset=35, safety=True, hash_=hash_)
 
 class BackupDir:
 	def __init__(self, type_: ModifiedType, name: str, mode: int, files: dict = None):
 		self._type = type_
 		self._name = name
 		self._mode = mode
-		self._files = dict((f.name, f) for f in files) if isinstance(files, (list, tuple, set)) else files.copy() if isinstance(files, dict) else {}
+		self._files = dict((f.name, f) for f in files) if isinstance(files, (list, tuple, set)) else\
+		 files.copy() if isinstance(files, dict) else {}
 
 	@property
 	def type(self):
@@ -210,69 +195,42 @@ class BackupDir:
 		return f
 
 	@classmethod
-	def _create(cls, path: str, *pt, filterc=lambda *a, **b: True, prev: Backup = None, async_: bool = False):
+	def create(cls, path: str, *pt, filterc=lambda *a, **b: True, prev: Backup = None):
 		type_: ModifiedType
 		name: str = pt[-1]
 		mode: int
-		files: list = []
+		files: set = set()
 		if os.path.isdir(path):
 			mode = os.stat(path).st_mode & 0o777
 			l = set(os.listdir(path))
 			if prev is not None:
 				l.update(prev.get_total_files(*pt))
-			ts = []
 			for n in filter(lambda a: filterc(os.path.join(*pt), a), l):
 				f = os.path.join(path, n)
-				ts.append((BackupDir if os.path.isdir(f) else BackupFile if os.path.exists(f) else prev.get(*pt, n).__class__).\
-					create(f, *pt, n, filterc=filterc, prev=prev, async_=async_, callback=files.append))
-			if async_:
-				for t in ts:
-					t.join()
+				files.add((BackupDir if os.path.isdir(f) else BackupFile if os.path.exists(f) else prev.get(*pt, n).__class__).\
+					create(f, *pt, n, filterc=filterc, prev=prev))
 			if prev is not None and len(files) == 0 and pt[-1] in prev.get_total_files(*pt[:-1]):
 				return None
 			type_ = ModifiedType.UPDATE
 		else:
 			type_ = ModifiedType.REMOVE
 			mode = 0
-		return cls(type_=type_, name=name, mode=mode, files=files)
+		if None in files:
+			files.remove(None)
+		return cls(type_=type_, name=name, mode=mode, files=list(files))
 
-	@classmethod
-	def create(cls, path: str, *pt, filterc=lambda *a, **b: True, prev: Backup = None, async_: bool = True, callback=None):
-		def c():
-			o = cls._create(path, *pt, filterc=filterc, prev=prev, async_=async_)
-			if callback is not None and o is not None:
-				callback(o)
-			return o
-		if async_:
-			t = threading.Thread(target=c, name='smart_backup_helper')
-			t.start()
-			return t
-		return c()
-
-	def _save(self, path: str, *, async_: bool = False):
+	def save(self, path: str):
 		path = os.path.join(path, self._name + '.D')
 		if self._type == ModifiedType.REMOVE:
-			with open(path, 'wb') as fd:
+			with open(path, 'wb', 1) as fd:
 				fd.write(self._type.to_bytes(1, byteorder='big'))
 		else:
 			os.mkdir(path)
-			with open(os.path.join(path, '0'), 'wb') as fd:
-				fd.write(
-					self._type.to_bytes(1, byteorder='big') +
-					self._mode.to_bytes(2, byteorder='big'))
-			ts = []
+			with open(os.path.join(path, '0'), 'wb', 3) as fd:
+				fd.write(self._type.to_bytes(1, byteorder='big'))
+				fd.write(self._mode.to_bytes(2, byteorder='big'))
 			for f in self._files.values():
-				ts.append(f.save(path, async_=async_))
-			if async_:
-				for t in ts:
-					t.join()
-
-	def save(self, path: str, *, async_: bool = True):
-		if async_:
-			t = threading.Thread(target=self._save, name='smart_backup_helper', args=[path], kwargs=dict(async_=async_))
-			t.start()
-			return t
-		return self._save(path)
+				f.save(path)
 
 	@classmethod
 	def load(cls, path: str):
@@ -281,7 +239,7 @@ class BackupDir:
 		mode: int
 		files: list = []
 		if os.path.isdir(path):
-			with open(os.path.join(path, '0'), 'rb') as fd:
+			with open(os.path.join(path, '0'), 'rb', 3) as fd:
 				type_ = ModifiedType(int.from_bytes(fd.read(1), byteorder='big'))
 				if type_ != ModifiedType.REMOVE:
 					mode = int.from_bytes(fd.read(2), byteorder='big')
@@ -294,21 +252,27 @@ class BackupDir:
 					elif e == '.D':
 						files.append(BackupDir.load(f))
 		else:
-			with open(path, 'rb') as fd:
+			with open(path, 'rb', 1) as fd:
 				type_ = ModifiedType(int.from_bytes(fd.read(1), byteorder='big'))
 				assert type_ == ModifiedType.REMOVE
 				mode = 0
 		return cls(type_=type_, name=name, mode=mode, files=files)
 
 class Backup:
-	_cache = weakref.WeakValueDictionary()
-
-	def __init__(self, mode: BackupMode, timestamp: int, comment: str, files: dict = None, prev: Backup = None):
+	def __init__(self, mode: BackupMode, timestamp: int, comment: str, files: dict = None,
+		*, safety: bool = False, manager: BackupManager = None, prev: [Backup, str] = None):
+		self._manager = manager if manager is not None else None if prev is None else prev.manager
+		assert self._manager is not None
 		self._mode = mode
 		self._timestamp = timestamp # unit: ms
 		self._comment = comment
 		self._files = dict((f.name, f) for f in files) if isinstance(files, (list, tuple, set)) else files.copy() if isinstance(files, dict) else {}
+		self._safety = safety
 		self._prev = prev
+
+	@property
+	def manager(self):
+		return self._manager
 
 	@property
 	def mode(self):
@@ -331,13 +295,24 @@ class Backup:
 		return self._comment
 
 	@property
+	def is_safety(self):
+		return self._safety
+
+	@property
 	def prev(self):
-		return self._prev
+		if self._prev is None:
+			return None
+		if isinstance(self._prev, Backup):
+			return self._prev
+		if isinstance(self._prev, str):
+			self._prev = self._manager.load(self._prev)
+			return self._prev
+		raise TypeError(type(self._prev))
 
 	@property
 	def z_index(self):
-		z = 0
-		prev = self._prev
+		z: int = 0
+		prev = self.prev
 		while prev is not None:
 			prev = prev.prev
 			z += 1
@@ -346,6 +321,13 @@ class Backup:
 	@property
 	def files(self):
 		return self._files.copy()
+
+	def has_parent(self, pid):
+		if self.prev is None:
+			return False
+		if self.prev.id == pid:
+			return True
+		return self.prev.has_parent(pid)
 
 	def get_total_files(self, *path):
 		files = self
@@ -357,43 +339,23 @@ class Backup:
 		else:
 			filel = set(files.files.keys())
 		if self._mode != BackupMode.FULL:
-			filel.update(self._prev.get_total_files(*path))
+			filel.update(self.prev.get_total_files(*path))
 		return set(filter(lambda a: self.get(*path, a).type != ModifiedType.REMOVE, filel))
 
 	def get(self, base, *path):
 		f = self._files.get(base, None)
 		if f is not None and len(path) > 0:
 			f = f.get(*path)
-		if f is None and self._prev is not None:
-			return self._prev.get(base, *path)
+		if f is None and self.prev is not None:
+			return self.prev.get(base, *path)
 		return f
 
-	@classmethod
-	def create(cls, mode: BackupMode, comment: str, base: str, needs: list, ignores: list = [], prev: Backup = None, async_: bool = True):
-		timestamp: int = int(time.time() * 1000)
-		files: list = []
-		l = set(os.listdir(base))
-		if mode == BackupMode.FULL:
-			if prev is not None:
-				prev = None
-		else:
-			assert prev is not None
-			if mode == BackupMode.DIFFERENTIAL:
-				while prev.mode != BackupMode.FULL:
-					prev = prev.prev
-			l.update(prev.get_total_files())
-		filterc = filters(ignores)
-		ts = []
-		for n in filter(lambda a: a in needs, l):
-			m = os.path.join(base, n)
-			ts.append((BackupDir if os.path.isdir(m) else BackupFile if os.path.exists(m) else prev.get(n).__class__).\
-				create(m, n, filterc=filterc, prev=prev, async_=async_, callback=files.append))
-		if async_:
-			for t in ts:
-				t.join()
-		return cls(mode=mode, timestamp=timestamp, comment=comment, files=files, prev=prev)
-
 	def restore(self, path: str, needs: list, ignores: list = []):
+		if not self._safety:
+			pth = os.path.join(self._basepath, hex(self._timestamp))
+			if not os.path.exists(pth):
+				self.save()
+			self = self.__class__.load(self._basepath, cached=False)
 		files = []
 		que = queue.SimpleQueue()
 		for f in self.get_total_files():
@@ -414,44 +376,198 @@ class Backup:
 			elif isinstance(f, BackupFile):
 				f.restore(p)
 
-	def save(self, path: str, async_: bool = True):
-		if not os.path.exists(path):
-			os.makedirs(path)
-		path = os.path.join(path, hex(self._timestamp))
+	def save(self):
+		if not os.path.exists(self._manager.basepath):
+			os.makedirs(self._manager.basepath)
+		path = os.path.join(self._manager.basepath, hex(self._timestamp))
 		os.mkdir(path)
-		with open(os.path.join(path, '0'), 'wb') as fd:
-			comment = self._comment.encode('utf8')
-			fd.write(
-				self._mode.to_bytes(1, byteorder='big') +
-				int(0 if self._prev is None else self._prev.timestamp * 1000).to_bytes(8, byteorder='big') +
-				len(comment).to_bytes(2, byteorder='big'))
-			fd.write(comment)
-		ts = []
-		for f in self._files.values():
-			ts.append(f.save(path, async_=async_))
-		if async_:
-			for t in ts:
-				t.join()
+		try:
+			with open(os.path.join(path, '0'), 'wb', 8192) as fd:
+				comment = self._comment.encode('utf8')
+				fd.write(self._mode.to_bytes(1, byteorder='big'))
+				fd.write(int(0 if self.prev is None else self.prev.timestamp * 1000).to_bytes(8, byteorder='big'))
+				fd.write(len(comment).to_bytes(2, byteorder='big'))
+				fd.write(comment)
+			for f in self._files.values():
+				f.save(path)
+		except:
+			shutil.rmtree(path)
+			raise
+		else:
+			self._manager.index.append(self)
 
-	@classmethod
-	def load(cls, path: str):
-		rpath = os.path.realpath(path)
-		if rpath in cls._cache:
-			return cls._cache[rpath]
+	def remove(self):
+		pred: list = self._manager.index.remove(self)
+		for d in pred:
+			shutil.rmtree(os.path.join(self._manager.basepath, d))
+
+	def __hash__(self):
+		return hash(hex(self.timestamp))
+
+class BackupIndex:
+	def __init__(self,
+		last: str = None,
+		ls: list = None,
+		nodes: list = None,
+		fulln: list = None):
+
+		self._last = last
+		self._list = ls
+		self._nodes = nodes
+		self._fulln = fulln
+
+	@property
+	def last(self):
+		return self._last
+
+	@property
+	def list(self):
+		return self._list
+
+	@property
+	def nodes(self):
+		return self._nodes
+
+	@property
+	def fulln(self):
+		return self._fulln
+
+	def load(self, path: str):
+		idx = os.path.join(path, 'index.json')
+		index: dict = {}
+		if os.path.exists(idx):
+			with open(idx, 'r') as fd:
+				index = json.load(fd)
+		self._last = index.get('last', None)
+		self._list = index.get('list', [])
+		self._nodes = index.get('nodes', [])
+		self._fulln = index.get('fulln', [])
+
+	def save(self, path: str):
+		with open(os.path.join(path, 'index.json'), 'w') as fd:
+			json.dump({
+				'last': self._last,
+				'list': self._list,
+				'nodes': self._nodes,
+				'fulln': self._fulln
+			}, fd, separators=(',', ':'))
+
+	def append(self, bk: Backup):
+		bid: str = bk.id
+		if bk.prev is None or self._last != bk.prev.id:
+			self._nodes.append(bid)
+			if bk.prev is None: # mode == BackupMode.FULL
+				self._fulln.append(bid)
+		self._last = bid
+		self._list.append(bid)
+
+	def remove(self, bk: Backup):
+		pr: Backup = bk
+		i: int
+		while True:
+			try:
+				i = self._nodes.index(pr.id)
+			except ValueError as e:
+				pr = pr.prev
+			else:
+				break
+		s = self._list.index(bk.id)
+		while True:
+			i += 1
+			if i >= len(self._nodes):
+				e = len(self._list)
+				break
+			nid = self._nodes[i]
+			if not bk.manager.load(nid).has_parent(bk.id):
+				e = self._list.index(nid)
+				break
+		if e == len(self._list):
+			self._last = self._list[s - 1] if s > 0 else None
+		lst = self._list[s:e]
+		del self._list[s:e]
+		self._nodes = [i for i in self._nodes if i not in lst]
+		self._fulln = [i for i in self._fulln if i not in lst]
+		return lst
+
+class BackupManager:
+	def __init__(self, basepath: str):
+		self.__cache = weakref.WeakValueDictionary()
+		self.__basepath = basepath
+		self.__index = BackupIndex()
+
+		self._loadcfg()
+
+	@property
+	def basepath(self):
+		return self.__basepath
+
+	@property
+	def index(self):
+		return self.__index
+
+	def _loadcfg(self):
+		self.__index.load(self.__basepath)
+
+	def savecfg(self):
+		if not os.path.exists(self.__basepath):
+			os.makedirs(self.__basepath)
+			self.__index = BackupIndex(None, [], [], [])
+		self.__index.save(self.__basepath)
+
+	def listID(self):
+		# return sorted(map(lambda a: int(a, 16), filter(lambda a: a.startswith('0x'), os.listdir(self.basepath))))
+		return self.index.list
+
+	def create(self, mode: BackupMode, comment: str, base: str, needs: list, ignores: list = [], saved: bool = True):
+		prev: Backup = None
+		if mode != BackupMode.FULL:
+			if self.index.last is None:
+				mode = BackupMode.FULL
+			else:
+				prev = self.load(self.index.last)
+
+		timestamp: int = int(time.time() * 1000)
+		files: set = set()
+		l = set(os.listdir(base))
+		if prev is not None:
+			if mode == BackupMode.DIFFERENTIAL:
+				while prev.mode != BackupMode.FULL:
+					prev = prev.prev
+			l.update(prev.get_total_files())
+		filterc = filters(ignores)
+		for n in filter(lambda a: a in needs, l):
+			m = os.path.join(base, n)
+			files.add((BackupDir if os.path.isdir(m) else BackupFile if os.path.exists(m) else prev.get(n).__class__).\
+				create(m, n, filterc=filterc, prev=prev))
+		if None in files:
+			files.remove(None)
+		bk = Backup(mode=mode, timestamp=timestamp, comment=comment, files=list(files), manager=self, prev=prev)
+		if saved:
+			bk.save()
+		return bk
+
+	def load(self, bid: str, cached: bool = True):
+		if bid in self.__cache:
+			if cached:
+				return self.__cache[bid]
+			else:
+				self.__cache.pop(bid)
+
+		path: str = os.path.join(self.__basepath, bid)
 		if not os.path.exists(path):
-			return None
+			raise BackupNotFoundError('Backup id {0} not found in "{1}"'.format(bid, self.__basepath))
 		mode: BackupMode
-		timestamp: int = int(os.path.basename(path), 16)
+		timestamp: int = int(bid, 16)
 		comment: str
 		files: list = []
+		previd: int
 		prev: Backup = None
-		with open(os.path.join(path, '0'), 'rb') as fd:
+		with open(os.path.join(path, '0'), 'rb', 8192) as fd:
 			mode = BackupMode(int.from_bytes(fd.read(1), byteorder='big'))
 			previd = int.from_bytes(fd.read(8), byteorder='big')
-			if previd != 0:
-				assert previd != timestamp
-				prev = cls.load(os.path.join(os.path.dirname(path), hex(previd)))
 			comment = fd.read(int.from_bytes(fd.read(2), byteorder='big')).decode('utf8')
+		if previd != 0:
+			assert previd != timestamp
 		for n in os.listdir(path):
 			f = os.path.join(path, n)
 			e = os.path.splitext(f)[1]
@@ -459,30 +575,23 @@ class Backup:
 				files.append(BackupFile.load(f))
 			elif e == '.D':
 				files.append(BackupDir.load(f))
-		obj = cls(mode=mode, timestamp=timestamp, comment=comment, files=files, prev=prev)
-		cls._cache[rpath] = obj
-		return obj
 
-	def __hash__(self):
-		return hash(hex(self.timestamp))
+		bk = Backup(mode=mode, timestamp=timestamp, comment=comment, files=files, safety=True, manager=self, prev=None if previd == 0 else hex(previd))
+		self.__cache[bid] = bk
+		return bk
 
-	@staticmethod
-	def list(path: str, limit: int = -1):
-		if not os.path.exists(path):
+	def list(self, limit: int = -1):
+		if not os.path.exists(self.basepath):
 			return list()
-		ids = sorted(map(lambda a: int(a, 16), filter(lambda a: a.startswith('0x'), os.listdir(path))))
+		ids: list = self.listID()
 		if limit > 0:
 			ids = ids[-limit:]
-		return [Backup.load(os.path.join(path, hex(i))) for i in ids]
+		return [self.load(i) for i in ids]
 
-	@staticmethod
-	def get_last(path: str):
-		if not os.path.exists(path):
+	def get_last(self):
+		if not os.path.exists(self.basepath) or self.index.last is None:
 			return None
-		ids = sorted(map(lambda a: int(a, 16), filter(lambda a: a.startswith('0x'), os.listdir(path))))
-		if len(ids) == 0:
-			return None
-		return Backup.load(os.path.join(path, hex(ids[-1])))
+		return self.load(self.index.last)
 
 
 def _filter(ignore: str):
@@ -518,39 +627,31 @@ def filters(ignores: list):
 		return True
 	return call
 
-def writetofile(src, dst, close: bool = True):
+def writetofile(src, dst):
 	if isinstance(src, (bytes, str)):
 		dst.write(src)
 		return
 	if isinstance(src, io.IOBase):
-		try:
-			while True:
-				b = src.read(8192)
-				if not b:
-					break
-				dst.write(b)
-		finally:
-			if close:
-				src.close()
+		while True:
+			b = src.read(8192)
+			if not b:
+				break
+			dst.write(b)
 		return
-	raise TypeError()
+	raise TypeError(type(data))
 
-def calchash(data, close: bool = True):
+def calchash(data):
 	if isinstance(data, bytes):
 		return hashlib.sha256(data).digest()
 	if isinstance(data, io.IOBase):
 		h = hashlib.sha256()
-		try:
-			while True:
-				d = data.read(8192)
-				if not d:
-					break
-				h.update(d)
-		finally:
-			if close:
-				data.close()
+		while True:
+			d = data.read(8192)
+			if not d:
+				break
+			h.update(d)
 		return h.digest()
-	raise TypeError()
+	raise TypeError(type(data))
 
 def clear_dir(path: str, filterc):
 	if not os.path.exists(path):
@@ -564,7 +665,7 @@ def clear_dir(path: str, filterc):
 		que.put(os.path.join(path, f))
 	while not que.empty():
 		f = que.get_nowait()
-		if not filterc(os.path.basename(f)):
+		if not filterc(f, os.path.basename(f)):
 			continue
 		if os.path.isdir(f):
 			ls = os.listdir(f)

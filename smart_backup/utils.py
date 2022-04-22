@@ -7,7 +7,7 @@ import mcdreforged.api.all as MCDR
 from . import globals as GL
 
 __all__ = [
-	'new_thread', 'get_current_job', 'begin_job', 'after_job', 'new_job', 'next_job', 'new_timer',
+	'new_thread', 'get_current_job', '_clear_job', 'after_job_wrapper', 'ping_job', 'after_job', 'next_job_call', 'new_job', 'new_timer',
 	'new_command', 'join_rtext', 'send_block_message', 'send_message', 'broadcast_message', 'log_info',
 	'get_total_size', 'format_size'
 ]
@@ -30,56 +30,70 @@ def check_job():
 	with job_lock:
 		return current_job is None
 
-def begin_job(job: str = None, block=False):
+def _clear_job():
+	global current_job
+	current_job = None
+
+def begin_job(job: str, block=False):
 	global current_job, job_lock
-	if block or job is None or current_job is None:
-		with job_lock:
-			while True:
-				if current_job is None:
-					assert job is not None
-					current_job = [job, 1]
-					return True
-				if job is None:
-					current_job[1] += 1
-					return True
-				if not block:
-					break
-				job_lock.wait()
+	with job_lock:
+		while True:
+			if current_job is None or current_job is False:
+				current_job = [job, 1]
+				return True
+			if not block:
+				break
+			job_lock.wait()
 	return False
+
+def ping_job():
+	global current_job, job_lock
+	with job_lock:
+		current_job[1] += 1
 
 def after_job():
 	global current_job, job_lock
 	with job_lock:
-		assert current_job is not None
-		current_job[1] -= 1
-		if current_job[1] == 0:
-			current_job = None
-			job_lock.notify()
+		if current_job is not None:
+			current_job[1] -= 1
+			if current_job[1] == 0:
+				current_job = None
+				job_lock.notify()
 
-def new_job(job: str):
+def after_job_wrapper(call):
+	@functools.wraps(call)
+	def c(*args, **kwargs):
+		try:
+			return call(*args, **kwargs)
+		finally:
+			after_job()
+	return c
+
+def next_job_call(call, *args, **kwargs):
+	global current_job, job_lock
+	with job_lock:
+		assert current_job is not None and current_job is not False
+		current_job = False
+	return call(*args, **kwargs)
+
+def new_job(job: str, block=False):
 	def w(call):
 		@functools.wraps(call)
 		def c(*args, **kwargs):
-			if job_lock._is_owned():
-				if current_job is not None:
-					current_job[0] = job
-				return call(*args, **kwargs)
 			with job_lock:
-				if not check_job() and len(args) > 0 and isinstance(args[0], MCDR.CommandSource):
-					send_message(args[0], MCDR.RText('In progress {} now'.format(current_job[0]), color=MCDR.RColor.red))
+				if current_job is not None and current_job is not False and not block:
+					if len(args) > 0 and isinstance(args[0], MCDR.CommandSource):
+						send_message(args[0], MCDR.RText('In progress {} now'.format(current_job[0]), color=MCDR.RColor.red))
+					else:
+						log_info(MCDR.RText('In progress {0} now, cannot do {1}'.format(current_job[0], job), color=MCDR.RColor.red))
 					return None
-				else:
-					begin_job(job, block=True)
+				begin_job(job, block=True)
 			try:
 				return call(*args, **kwargs)
 			finally:
 				after_job()
 		return c
 	return w
-
-def next_job(call, *args, **kwargs):
-	with job_lock:
-		call(*args, **kwargs)
 
 def new_timer(interval, call, args: list=None, kwargs: dict=None, daemon: bool=True, name: str='smart_backup_timer'):
 	tm = Timer(interval, call, args=args, kwargs=kwargs)
@@ -134,22 +148,13 @@ def get_total_size(path: str):
 			size += os.stat(f).st_size
 	return size
 
+__bt_units = ('B', 'KB', 'MB', 'GB', 'TB', 'PB')
+
 def format_size(size: int):
 	sz: float = float(size)
-	ut: str = 'B'
-	if sz >= 1000:
-		sz /= 1024
-		ut = 'KB'
-	if sz >= 1000:
-		sz /= 1024
-		ut = 'MB'
-	if sz >= 1000:
-		sz /= 1024
-		ut = 'GB'
-	if sz >= 1000:
-		sz /= 1024
-		ut = 'TB'
-	if sz >= 1000:
-		sz /= 1024
-		ut = 'PB'
+	ut: str = __bt_units[0]
+	for u in __bt_units[1:]:
+		if sz >= 1000:
+			sz /= 1024
+			ut = u
 	return '{0:.2f}{1}'.format(sz, ut)

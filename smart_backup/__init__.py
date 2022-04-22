@@ -17,5 +17,8 @@ def on_unload(server: MCDR.PluginServerInterface):
 	log_info('Smart backup is on UNLOAD')
 	GL.destory()
 
+def on_server_start(server: MCDR.PluginServerInterface):
+	api.on_server_start(server)
+
 def on_info(server: MCDR.ServerInterface, info: MCDR.Info):
   api.on_info(server, info)

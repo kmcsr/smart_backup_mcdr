@@ -17,7 +17,7 @@ HelpMessage = '''
 {0} query <id> 查询备份详细信息
 {0} make [<comment> = 'None'] 创建新备份(差异/全盘)
 {0} makefull [<comment> = 'None'] 创建全盘备份
-{0} rm <id> [<force> = false] 删除指定备份(及其子备份) #TODO
+{0} remove <id> [<force> = false] 删除指定备份(及其子备份)
 {0} restore <id> [<force> = false] 回档至指定备份
 {0} confirm 确认操作
 {0} abort 取消操作
@@ -45,6 +45,9 @@ def register(server: MCDR.PluginServerInterface):
 		then(GL.Config.literal('restore').
 			then(MCDR.Text('id').runs(lambda src, ctx: command_restore(src, ctx['id'])).
 				then(MCDR.Boolean('force').runs(lambda src, ctx: command_restore(src, ctx['id'], ctx['force']))))).
+		then(GL.Config.literal('remove').
+			then(MCDR.Text('id').runs(lambda src, ctx: command_remove(src, ctx['id'])).
+				then(MCDR.Boolean('force').runs(lambda src, ctx: command_remove(src, ctx['id'], ctx['force']))))).
 		then(GL.Config.literal('confirm').runs(command_confirm)).
 		then(GL.Config.literal('abort').runs(command_abort)).
 		then(GL.Config.literal('reload').runs(command_config_load)).
@@ -56,28 +59,24 @@ def command_help(source: MCDR.CommandSource):
 
 @new_thread
 def command_status(source: MCDR.CommandSource):
-	lb = Backup.get_last(GL.Config.backup_path)
+	lb = GL.Manager.get_last()
 	lc = 'None' if lb is None else new_command(
 		'{0} restore {1}'.format(Prefix, lb.id),
 		'{0}: {1}({2})'.format(lb.id, lb.strftime, lb.comment))
-	li = 0
 	bs = 0
 	if os.path.exists(GL.Config.backup_path):
-		for a in os.listdir(GL.Config.backup_path):
-			if a.startswith('0x'):
-				li += 1
 		bs = get_total_size(GL.Config.backup_path)
 	send_block_message(source,
-		'备份文件夹: ' + GL.Config.backup_path,
-		'  大小: ' + format_size(bs),
-		'  备份条数: ' + str(li),
-		join_rtext('自动备份:', MCDR.RText('disabled' if api.backup_timer is None else 'enabled', color=MCDR.RColor.yellow)),
-		join_rtext('最近一次备份:', lc)
+		'Backup path: ' + GL.Config.backup_path,
+		'  Size: ' + format_size(bs),
+		'  Count: ' + str(len(GL.Manager.listID())),
+		join_rtext('Timed backup:', MCDR.RText('disabled' if api.backup_timer is None else 'enabled', color=MCDR.RColor.yellow)),
+		join_rtext('Latest backup:', lc)
 	)
 
 @new_thread
 def command_list_backup(source: MCDR.CommandSource, limit: int):
-	bks = Backup.list(GL.Config.backup_path, limit)
+	bks = GL.Manager.list(limit)
 	lines = [MCDR.RTextList(b.z_index * '|',
 		new_command('{0} restore {1}'.format(Prefix, b.id), b.id).h(join_rtext(
 			'ID: ' + b.id,
@@ -87,59 +86,53 @@ def command_list_backup(source: MCDR.CommandSource, limit: int):
 			sep='\n')),
 		': ' + b.comment)
 	for b in bks]
-	send_block_message(source, '最后{}条备份:'.format(len(bks)), *lines)
+	send_block_message(source, 'Last {} backups:'.format(len(bks)), *lines)
 
 @new_thread
 def command_query_backup(source: MCDR.CommandSource, bid: str):
 	if not bid.startswith('0x'):
 		bid = '0x' + bid
-	path = os.path.join(GL.Config.backup_path, bid)
-	bk = Backup.load(path)
-	if bk is None:
+	try:
+		bk = GL.Manager.load(bid)
+	except BackupNotFoundError:
 		send_message(source, MCDR.RText('Cannot find backup with id "{}"'.format(bid)))
 		return
 	send_block_message(source,
 		'ID: ' + bk.id,
 		'Comment: ' + bk.comment,
 		'Date: ' + bk.strftime,
-		'Size: ' + format_size(get_total_size(path)),
+		'Size: ' + format_size(get_total_size(os.path.join(GL.Config.backup_path, bid))),
 		join_rtext(
-			new_command('{0} restore {1}'.format(Prefix, bk.id), '[回档]')
+			new_command('{0} restore {1}'.format(Prefix, bk.id), '[RESTORE]')
 		)
 	)
 
 @new_thread
-@new_job('make backup')
 def command_make(source: MCDR.CommandSource, comment: str):
-	server = source.get_server()
-	broadcast_message('Making backup "{}"'.format(comment))
-
-	next_job(api.make_backup, source, comment)
+	api.make_backup(source, comment)
 
 @new_thread
-@new_job('make backup')
 def command_makefull(source: MCDR.CommandSource, comment: str):
-	server = source.get_server()
-	broadcast_message('Making backup "{}"'.format(comment))
-
-	next_job(api.make_backup, source, comment, mode=BackupMode.FULL)
+	api.make_backup(source, comment, mode=BackupMode.FULL)
 
 @new_thread
 @new_job('restore')
 def command_restore(source: MCDR.CommandSource, bid: str, force: bool = False):
 	if force:
-		api.restore_backup(source, bid)
+		next_job_call(api.restore_backup, source, bid)
 		return
 
 	if not bid.startswith('0x'):
 		bid = '0x' + bid
-	path = os.path.join(GL.Config.backup_path, bid)
-	bk = Backup.load(path)
-	if bk is None:
+	try:
+		bk = GL.Manager.load(bid)
+	except BackupNotFoundError:
 		send_message(source, MCDR.RText('Cannot find backup with id "{}"'.format(bid)))
 		return
 	server = source.get_server()
 
+	@new_thread
+	@after_job_wrapper
 	def pre_restore():
 		abort: bool = False
 		timeout: int = GL.Config.restore_timeout
@@ -149,35 +142,63 @@ def command_restore(source: MCDR.CommandSource, bid: str, force: bool = False):
 		date = bk.strftime
 		register_confirm(None, lambda:0, ab)
 		while timeout > 0:
-			broadcast_message('{t} 秒后将重启回档至{date}({comment}), 输入'.format(t=timeout, date=date, comment=bk.comment),
-				new_command('{} abort'.format(Prefix)), '撤销回档')
+			broadcast_message('Server will restart and recovery to {date}({comment}) after {t} sec, run'.format(t=timeout, date=date, comment=bk.comment),
+				new_command('{} abort'.format(Prefix)), 'to cancel restore')
 			time.sleep(1)
 			if abort:
-				broadcast_message('已取消回档')
+				broadcast_message('Canceled restore')
 				return
 			timeout -= 1
 		confirm_map.pop(None, None)
-		next_job(lambda: api.restore_backup(source, bid))
+		next_job_call(api.restore_backup, source, bid)
 
-	begin_job()
+	ping_job()
 	register_confirm(source.player if source.is_player else '',
-		new_thread(lambda: (pre_restore(), after_job())),
-		lambda: (send_message(source, '已取消回档'), after_job()), timeout=15)
-	send_message(source, MCDR.RText('确认回档至 "{}" 吗?'.format(bk.comment)).
+		pre_restore,
+		after_job_wrapper(lambda: send_message(source, 'Canceled restore')), timeout=15)
+	send_message(source, MCDR.RText('Are you sure recovery to "{}"?'.format(bk.comment)).
 		h('id: ' + bk.id,
 			'comment: ' + bk.comment,
 			'date: ' + bk.strftime,
-			'size: ' + format_size(get_total_size(path))))
-	send_message(source, '输入', new_command('{} confirm'.format(Prefix)), '确认, 输入',
-		new_command('{} abort'.format(Prefix)), '取消')
+			'size: ' + format_size(get_total_size(os.path.join(GL.Config.backup_path, bid)))))
+	send_message(source, 'Run', new_command('{} confirm'.format(Prefix)), 'to confirm, Run',
+		new_command('{} abort'.format(Prefix)), 'to cancel')
+
+@new_thread
+@new_job('remove')
+def command_remove(source: MCDR.CommandSource, bid: str, force: bool = False):
+	if force:
+		next_job_call(api.remove_backup, source, bid)
+		return
+
+	if not bid.startswith('0x'):
+		bid = '0x' + bid
+	try:
+		bk = GL.Manager.load(bid)
+	except BackupNotFoundError:
+		send_message(source, MCDR.RText('Cannot find backup with id "{}"'.format(bid)))
+		return
+	server = source.get_server()
+
+	ping_job()
+	register_confirm(source.player if source.is_player else '',
+		lambda: next_job_call(api.remove_backup, source, bid),
+		after_job_wrapper(lambda: send_message(source, 'Canceled removing')), timeout=15)
+	send_message(source, MCDR.RText('Are you sure to remove "{}" and child backup for it?'.format(bk.comment)).
+		h('id: ' + bk.id,
+			'comment: ' + bk.comment,
+			'date: ' + bk.strftime,
+			'size: ' + format_size(get_total_size(os.path.join(GL.Config.backup_path, bid)))))
+	send_message(source, 'Run', new_command('{} confirm'.format(Prefix)), 'to confirm, Run',
+		new_command('{} abort'.format(Prefix)), 'to cancel')
 
 def command_confirm(source: MCDR.CommandSource):
-	confirm_map.pop(source.player if source.is_player else '', (lambda s: send_message(s, '当前没有正在执行的操作'), 0))[0](source)
+	confirm_map.pop(source.player if source.is_player else '', (lambda s: send_message(s, 'There are no any action in progess'), 0))[0](source)
 
 def command_abort(source: MCDR.CommandSource):
 	c = confirm_map.pop(source.player if source.is_player else '', (0, 0))[1]
 	if not c:
-		c = confirm_map.pop(None, (0, lambda s: send_message(s, '当前没有正在执行的操作')))[1]
+		c = confirm_map.pop(None, (0, lambda s: send_message(s, 'There are no any action in progess')))[1]
 	c(source)
 
 @new_thread

@@ -6,4 +6,5 @@
 
 - Support *Full Backup* / *Incremental Backup* / *Differential Backup
 - Support **timed backup**
+- Support **auto clean** out of ranged backups
 

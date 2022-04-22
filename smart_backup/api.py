@@ -40,9 +40,7 @@ def _timed_make_backup():
 	global backup_timer
 	backup_timer = None
 	source = GL.SERVER_INS.get_plugin_command_source()
-	cmt = 'SMB timed backup: ' + time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-	broadcast_message('Making backup "{}"'.format(cmt))
-	make_backup(source, cmt)
+	make_backup(source, time.strftime('SMB timed backup: %Y-%m-%d %H:%M:%S', time.localtime()))
 
 @GL.on_load_call
 def on_load(server: MCDR.PluginServerInterface):
@@ -55,63 +53,81 @@ def on_unload(server: MCDR.PluginServerInterface):
 		backup_timer.cancel()
 		backup_timer = None
 
+def on_server_start(server: MCDR.PluginServerInterface):
+	_clear_job()
+
+@new_job('clean up backup')
+def clean_backup():
+	if GL.Config.full_backup_limit < 1:
+		broadcast_message(MCDR.RText('[ERROR] full_backup_limit is less than one, cannot do clean up', color=MCDR.RColor.red))
+		return
+	broadcast_message('Cleaning backup...')
+	start_time = time.time()
+	before_size = get_total_size(GL.Config.backup_path)
+	while len(GL.Manager.index.fulln) > GL.Config.full_backup_limit:
+		bid = GL.Manager.index.fulln[GL.Config.get_next_clean_index()]
+		bk = GL.Manager.load(bid)
+		broadcast_message('Removing backup {id}:{comment}({date})...'.format(id=bk.id, comment=bk.comment, date=bk.strftime))
+		bk.remove()
+	used_time = time.time() - start_time
+	free_size = before_size - get_total_size(GL.Config.backup_path)
+	broadcast_message('Backup cleaned up, use {0:.2f} sec, free up disk {1}'.format(used_time, format_size(free_size)))
+
 @new_job('make backup')
-def make_backup(source: MCDR.CommandSource, comment: str, mode: BackupMode = None):
+def make_backup(source: MCDR.CommandSource, comment: str, mode: BackupMode = None, clean: bool = True):
 	cancel_backup_timer()
 	server = source.get_server()
+	broadcast_message('Making backup "{}"'.format(comment))
 	start_time = time.time()
-	tuple(map(server.execute, GL.Config.befor_backup))
 	def c():
-		nonlocal mode
-		prev: Backup = Backup.get_last(GL.Config.backup_path)
+		nonlocal mode, start_time
 		if mode is None:
+			prev: Backup = GL.Manager.get_last()
 			mode = BackupMode.FULL
-			if 'incremental_count' not in GL.Config.cache or \
-				GL.Config.cache['incremental_count'] >= GL.Config.incremental_backup_limit:
-				GL.Config.cache['incremental_count'] = 0
-				if 'differential_count' not in GL.Config.cache or \
-					GL.Config.cache['differential_count'] >= GL.Config.differential_backup_limit:
-					GL.Config.cache['differential_count'] = 0
-				else:
-					if prev is None:
-						GL.Config.cache['differential_count'] = 0
-					else:
-						GL.Config.cache['differential_count'] += 1
-						mode = BackupMode.DIFFERENTIAL
-			else:
-				if prev is None:
-					GL.Config.cache['incremental_count'] = 0
-				else:
+			if prev is not None:
+				if 'incremental_count' in GL.Config.cache and \
+					GL.Config.cache['incremental_count'] < GL.Config.incremental_backup_limit:
 					GL.Config.cache['incremental_count'] += 1
 					mode = BackupMode.INCREMENTAL
+				elif 'differential_count' in GL.Config.cache and \
+					GL.Config.cache['differential_count'] < GL.Config.differential_backup_limit:
+					GL.Config.cache['differential_count'] += 1
+					mode = BackupMode.DIFFERENTIAL
 		if mode == BackupMode.FULL:
-			prev = None
-		backup = Backup.create(mode, comment,
-			source.get_server().get_mcdr_config()['working_directory'], GL.Config.backup_needs, GL.Config.backup_ignores, prev=prev)
+			GL.Config.cache['incremental_count'] = 0
+			GL.Config.cache['differential_count'] = 0
+		elif mode == BackupMode.DIFFERENTIAL:
+			GL.Config.cache['incremental_count'] = 0
+
+		backup = GL.Manager.create(mode, comment,
+			source.get_server().get_mcdr_config()['working_directory'], GL.Config.backup_needs, GL.Config.backup_ignores, saved=False)
 		send_message(source, 'Saving backup "{}"'.format(comment), log=True)
-		backup.save(GL.Config.backup_path)
+		backup.save()
 		send_message(source, 'Saved backup "{}"'.format(comment), log=True)
-		tuple(map(server.execute, GL.Config.after_backup))
+		for _ in map(server.execute, GL.Config.after_backup): pass
 		used_time = time.time() - start_time
 		broadcast_message('Backup finished, use {:.2f} sec'.format(used_time))
 		_flush_backup_timer()
+		if clean and mode == BackupMode.FULL and GL.Config.full_backup_limit > 0 and len(GL.Manager.index.fulln) > GL.Config.full_backup_limit:
+			broadcast_message('Backup out of range, automagically cleaning backups...')
+			next_job_call(clean_backup)
 
 	if len(GL.Config.start_backup_trigger_info) > 0:
-		begin_job()
+		ping_job()
 		global game_saved_callback
-		game_saved_callback = new_thread(lambda: (c(), after_job()))
-		tuple(map(server.execute, GL.Config.befor_backup))
+		game_saved_callback = new_thread(after_job_wrapper(c))
+		for _ in map(server.execute, GL.Config.befor_backup): pass
 	else:
-		tuple(map(server.execute, GL.Config.befor_backup))
+		for _ in map(server.execute, GL.Config.befor_backup): pass
 		c()
 
 @new_job('restore')
 def restore_backup(source: MCDR.CommandSource, bid: str):
 	if not bid.startswith('0x'):
 		bid = '0x' + bid
-	path = os.path.join(GL.Config.backup_path, bid)
-	bk = Backup.load(path)
-	if bk is None:
+	try:
+		bk = GL.Manager.load(bid)
+	except BackupNotFoundError:
 		send_message(source, MCDR.RText('Cannot find backup with id "{}"'.format(bid), color=MCDR.RColor.red))
 		return False
 	server = source.get_server()
@@ -119,6 +135,7 @@ def restore_backup(source: MCDR.CommandSource, bid: str):
 	broadcast_message('Stopping the server')
 	server.stop()
 	server.wait_for_start()
+	make_backup(source, f'Server before restore({bid}) backup', mode=BackupMode.FULL, clean=False)
 	log_info('Restoring...')
 	bk.restore(server.get_mcdr_config()['working_directory'], GL.Config.backup_needs, GL.Config.backup_ignores)
 	log_info('Starting the server')
@@ -126,4 +143,17 @@ def restore_backup(source: MCDR.CommandSource, bid: str):
 
 	return True
 
+@new_job('remove')
+def remove_backup(source: MCDR.CommandSource, bid: str):
+	if not bid.startswith('0x'):
+		bid = '0x' + bid
+	try:
+		bk = GL.Manager.load(bid)
+	except BackupNotFoundError:
+		send_message(source, MCDR.RText('Cannot find backup with id "{}"'.format(bid), color=MCDR.RColor.red))
+		return False
+	server = source.get_server()
 
+	bk.remove()
+	broadcast_message('<{0}> removed backup {1}({2})'.format(source, bk.strftime, bk.comment))
+	return True
