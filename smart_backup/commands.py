@@ -11,18 +11,18 @@ from . import api
 Prefix = '!!smb'
 
 HelpMessage = '''
-{0} help 显示帮助信息
-{0} status 显示插件状态
-{0} list [<limit> = 10] 列出<limit>条备份
-{0} query <id> 查询备份详细信息
-{0} make [<comment> = 'None'] 创建新备份(差异/全盘)
-{0} makefull [<comment> = 'None'] 创建全盘备份
-{0} remove <id> [<force> = false] 删除指定备份(及其子备份)
-{0} restore <id> [<force> = false] 回档至指定备份
-{0} confirm 确认操作
-{0} abort 取消操作
-{0} reload 重新加载配置文件
-{0} save 保存配置文件
+{0} help :Show this help message
+{0} status :Show the plugin status
+{0} list [<limit> = 10] :List up to <limit> backups
+{0} query <id> :Query full information of backup
+{0} make [<comment> = 'None'] :Create new backup
+{0} makefull [<comment> = 'None'] :Create new full backup
+{0} remove <id> [<force> = false] :Remove backup
+{0} restore <id> [<force> = false] :Restore backup
+{0} confirm :Confirm operation
+{0} abort :Cancel operation
+{0} reload :Reload config file
+{0} save :Save config file
 '''.strip().format(Prefix)
 
 def register(server: MCDR.PluginServerInterface):
@@ -71,22 +71,24 @@ def command_status(source: MCDR.CommandSource):
 		'  Size: ' + format_size(bs),
 		'  Count: ' + str(len(GL.Manager.listID())),
 		join_rtext('Timed backup:', MCDR.RText('disabled' if api.backup_timer is None else 'enabled', color=MCDR.RColor.yellow)),
-		join_rtext('Latest backup:', lc)
+		join_rtext('Last backup:', lc)
 	)
 
 @new_thread
 def command_list_backup(source: MCDR.CommandSource, limit: int):
 	bks = GL.Manager.list(limit)
-	lines = [MCDR.RTextList(b.z_index * '|',
-		new_command('{0} restore {1}'.format(Prefix, b.id), b.id).h(join_rtext(
-			'ID: ' + b.id,
-			'Comment: ' + b.comment,
-			'Date: ' + b.strftime,
-			'Size: ' + format_size(get_total_size(os.path.join(GL.Config.backup_path, b.id))),
-			sep='\n')),
-		': ' + b.comment)
-	for b in bks]
-	send_block_message(source, 'Last {} backups:'.format(len(bks)), *lines)
+	send_message(source, GL.BIG_BLOCK_BEFOR)
+	send_message(source, 'Last backups (up to {} lines):'.format(limit))
+	for b in bks:
+		send_message(source, MCDR.RTextList(b.z_index * '|',
+			new_command('{0} restore {1}'.format(Prefix, b.id), b.id).h(join_rtext(
+				'ID: ' + b.id,
+				'Comment: ' + b.comment,
+				'Date: ' + b.strftime,
+				'Size: ' + format_size(get_total_size(os.path.join(GL.Config.backup_path, b.id))),
+				sep='\n')),
+			': ' + b.comment))
+	send_message(source, GL.BIG_BLOCK_AFTER)
 
 @new_thread
 def command_query_backup(source: MCDR.CommandSource, bid: str):
@@ -119,7 +121,7 @@ def command_makefull(source: MCDR.CommandSource, comment: str):
 @new_job('restore')
 def command_restore(source: MCDR.CommandSource, bid: str, force: bool = False):
 	if force:
-		next_job_call(api.restore_backup, source, bid)
+		swap_job_call(api.restore_backup, source, bid)
 		return
 
 	if not bid.startswith('0x'):
@@ -150,7 +152,7 @@ def command_restore(source: MCDR.CommandSource, bid: str, force: bool = False):
 				return
 			timeout -= 1
 		confirm_map.pop(None, None)
-		next_job_call(api.restore_backup, source, bid)
+		swap_job_call(api.restore_backup, source, bid)
 
 	ping_job()
 	register_confirm(source.player if source.is_player else '',
@@ -168,7 +170,7 @@ def command_restore(source: MCDR.CommandSource, bid: str, force: bool = False):
 @new_job('remove')
 def command_remove(source: MCDR.CommandSource, bid: str, force: bool = False):
 	if force:
-		next_job_call(api.remove_backup, source, bid)
+		swap_job_call(api.remove_backup, source, bid)
 		return
 
 	if not bid.startswith('0x'):
@@ -182,7 +184,7 @@ def command_remove(source: MCDR.CommandSource, bid: str, force: bool = False):
 
 	ping_job()
 	register_confirm(source.player if source.is_player else '',
-		lambda: next_job_call(api.remove_backup, source, bid),
+		after_job_wrapper(lambda: swap_job_call(api.remove_backup, source, bid)),
 		after_job_wrapper(lambda: send_message(source, 'Canceled removing')), timeout=15)
 	send_message(source, MCDR.RText('Are you sure to remove "{}" and child backup for it?'.format(bk.comment)).
 		h('id: ' + bk.id,

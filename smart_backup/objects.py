@@ -259,13 +259,14 @@ class BackupDir:
 		return cls(type_=type_, name=name, mode=mode, files=files)
 
 class Backup:
-	def __init__(self, mode: BackupMode, timestamp: int, comment: str, files: dict = None,
+	def __init__(self, mode: BackupMode, timestamp: int, comment: str, outdate: int, files: dict = None,
 		*, safety: bool = False, manager: BackupManager = None, prev: [Backup, str] = None):
 		self._manager = manager if manager is not None else None if prev is None else prev.manager
 		assert self._manager is not None
 		self._mode = mode
 		self._timestamp = timestamp # unit: ms
 		self._comment = comment
+		self._outdate = outdate
 		self._files = dict((f.name, f) for f in files) if isinstance(files, (list, tuple, set)) else files.copy() if isinstance(files, dict) else {}
 		self._safety = safety
 		self._prev = prev
@@ -295,12 +296,16 @@ class Backup:
 		return self._comment
 
 	@property
+	def outdate(self):
+		return self._outdate
+
+	@property
 	def is_safety(self):
 		return self._safety
 
 	@property
 	def prev(self):
-		if self._prev is None:
+		if self._mode == BackupMode.FULL:
 			return None
 		if isinstance(self._prev, Backup):
 			return self._prev
@@ -386,6 +391,7 @@ class Backup:
 				comment = self._comment.encode('utf8')
 				fd.write(self._mode.to_bytes(1, byteorder='big'))
 				fd.write(int(0 if self.prev is None else self.prev.timestamp * 1000).to_bytes(8, byteorder='big'))
+				fd.write(int(self._outdate).to_bytes(8, byteorder='big'))
 				fd.write(len(comment).to_bytes(2, byteorder='big'))
 				fd.write(comment)
 			for f in self._files.values():
@@ -405,16 +411,18 @@ class Backup:
 		return hash(hex(self.timestamp))
 
 class BackupIndex:
-	def __init__(self,
+	def __init__(self, *,
 		last: str = None,
-		ls: list = None,
-		nodes: list = None,
-		fulln: list = None):
+		ls: list = [],
+		nodes: list = [],
+		fulln: list = [],
+		outdates: list = []):
 
 		self._last = last
 		self._list = ls
 		self._nodes = nodes
 		self._fulln = fulln
+		self._outdates = outdates
 
 	@property
 	def last(self):
@@ -432,6 +440,19 @@ class BackupIndex:
 	def fulln(self):
 		return self._fulln
 
+	@property
+	def outdates(self):
+		return self._outdates
+
+	def pop_outdated(self):
+		if len(self._outdates) == 0:
+			return None
+		b = self._outdates[0]
+		if b[1] <= time.time() // 60:
+			self._outdates.pop(0)
+			return b[0]
+		return None
+
 	def load(self, path: str):
 		idx = os.path.join(path, 'index.json')
 		index: dict = {}
@@ -442,14 +463,15 @@ class BackupIndex:
 		self._list = index.get('list', [])
 		self._nodes = index.get('nodes', [])
 		self._fulln = index.get('fulln', [])
+		self._outdates = index.get('outdates', [])
 
 	def save(self, path: str):
 		with open(os.path.join(path, 'index.json'), 'w') as fd:
 			json.dump({
 				'last': self._last,
 				'list': self._list,
-				'nodes': self._nodes,
-				'fulln': self._fulln
+				'fulln': self._fulln,
+				'outdates': self._outdates
 			}, fd, separators=(',', ':'))
 
 	def append(self, bk: Backup):
@@ -458,8 +480,24 @@ class BackupIndex:
 			self._nodes.append(bid)
 			if bk.prev is None: # mode == BackupMode.FULL
 				self._fulln.append(bid)
+				if bk.outdate != 1:
+					self._outdates = BackupIndex.insertOutdate(self._outdates, bk)
 		self._last = bid
 		self._list.append(bid)
+
+	@staticmethod
+	def insertOutdate(outdates: list, bk: Backup):
+		manager = bk.manager
+		i: int
+		for i, b in enumerate(outdates):
+			if b[1] > bk.outdate:
+				break
+		else:
+			outdates.append([bk.id, bk.outdate])
+			return outdates
+		outdates.insert(i, [bk.id, bk.outdate])
+		print('OUTDATES:', outdates)
+		return outdates
 
 	def remove(self, bk: Backup):
 		pr: Backup = bk
@@ -487,6 +525,7 @@ class BackupIndex:
 		del self._list[s:e]
 		self._nodes = [i for i in self._nodes if i not in lst]
 		self._fulln = [i for i in self._fulln if i not in lst]
+		self._outdates = [i for i in self._outdates if i not in lst]
 		return lst
 
 class BackupManager:
@@ -511,14 +550,14 @@ class BackupManager:
 	def savecfg(self):
 		if not os.path.exists(self.__basepath):
 			os.makedirs(self.__basepath)
-			self.__index = BackupIndex(None, [], [], [])
+			self.__index = BackupIndex()
 		self.__index.save(self.__basepath)
 
 	def listID(self):
 		# return sorted(map(lambda a: int(a, 16), filter(lambda a: a.startswith('0x'), os.listdir(self.basepath))))
 		return self.index.list
 
-	def create(self, mode: BackupMode, comment: str, base: str, needs: list, ignores: list = [], saved: bool = True):
+	def create(self, mode: BackupMode, comment: str, outdate: int, base: str, needs: list, ignores: list = [], saved: bool = True):
 		prev: Backup = None
 		if mode != BackupMode.FULL:
 			if self.index.last is None:
@@ -541,7 +580,7 @@ class BackupManager:
 				create(m, n, filterc=filterc, prev=prev))
 		if None in files:
 			files.remove(None)
-		bk = Backup(mode=mode, timestamp=timestamp, comment=comment, files=list(files), manager=self, prev=prev)
+		bk = Backup(mode=mode, timestamp=timestamp, comment=comment, outdate=outdate, files=list(files), manager=self, prev=prev)
 		if saved:
 			bk.save()
 		return bk
@@ -559,12 +598,14 @@ class BackupManager:
 		mode: BackupMode
 		timestamp: int = int(bid, 16)
 		comment: str
+		outdate: int
 		files: list = []
 		previd: int
 		prev: Backup = None
 		with open(os.path.join(path, '0'), 'rb', 8192) as fd:
 			mode = BackupMode(int.from_bytes(fd.read(1), byteorder='big'))
 			previd = int.from_bytes(fd.read(8), byteorder='big')
+			outdate = int.from_bytes(fd.read(8), byteorder='big')
 			comment = fd.read(int.from_bytes(fd.read(2), byteorder='big')).decode('utf8')
 		if previd != 0:
 			assert previd != timestamp
@@ -576,7 +617,7 @@ class BackupManager:
 			elif e == '.D':
 				files.append(BackupDir.load(f))
 
-		bk = Backup(mode=mode, timestamp=timestamp, comment=comment, files=files, safety=True, manager=self, prev=None if previd == 0 else hex(previd))
+		bk = Backup(mode=mode, timestamp=timestamp, comment=comment, outdate=outdate, files=files, safety=True, manager=self, prev=None if previd == 0 else hex(previd))
 		self.__cache[bid] = bk
 		return bk
 

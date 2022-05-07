@@ -40,7 +40,7 @@ def _timed_make_backup():
 	global backup_timer
 	backup_timer = None
 	source = GL.SERVER_INS.get_plugin_command_source()
-	make_backup(source, time.strftime('SMB timed backup: %Y-%m-%d %H:%M:%S', time.localtime()))
+	make_backup(source, time.strftime('SMB timed backup: %Y-%m-%d %H:%M:%S', time.localtime()), timed=True)
 
 @GL.on_load_call
 def on_load(server: MCDR.PluginServerInterface):
@@ -65,16 +65,18 @@ def clean_backup():
 	start_time = time.time()
 	before_size = get_total_size(GL.Config.backup_path)
 	while len(GL.Manager.index.fulln) > GL.Config.full_backup_limit:
-		bid = GL.Manager.index.fulln[GL.Config.get_next_clean_index()]
+		bid = GL.Manager.index.pop_outdated()
+		if bid is None:
+			break
 		bk = GL.Manager.load(bid)
-		broadcast_message('Removing backup {id}:{comment}({date})...'.format(id=bk.id, comment=bk.comment, date=bk.strftime))
+		broadcast_message('Outdated backup {id}:{comment}({date}).'.format(id=bk.id, comment=bk.comment, date=bk.strftime))
 		bk.remove()
 	used_time = time.time() - start_time
 	free_size = before_size - get_total_size(GL.Config.backup_path)
 	broadcast_message('Backup cleaned up, use {0:.2f} sec, free up disk {1}'.format(used_time, format_size(free_size)))
 
 @new_job('make backup')
-def make_backup(source: MCDR.CommandSource, comment: str, mode: BackupMode = None, clean: bool = True):
+def make_backup(source: MCDR.CommandSource, comment: str, mode: BackupMode = None, *, timed: bool = False, clean: bool = True):
 	cancel_backup_timer()
 	server = source.get_server()
 	broadcast_message('Making backup "{}"'.format(comment))
@@ -99,20 +101,30 @@ def make_backup(source: MCDR.CommandSource, comment: str, mode: BackupMode = Non
 		elif mode == BackupMode.DIFFERENTIAL:
 			GL.Config.cache['incremental_count'] = 0
 
-		backup = GL.Manager.create(mode, comment,
+		outdate: int
+		if timed:
+			outdate = GL.Config.get_next_protect_time()
+			outdate = int(time.time() // 60 + outdate) if outdate > 0 else 0
+		else:
+			outdate = 1
+		backup = GL.Manager.create(mode, comment, outdate,
 			source.get_server().get_mcdr_config()['working_directory'], GL.Config.backup_needs, GL.Config.backup_ignores, saved=False)
 		send_message(source, 'Saving backup "{}"'.format(comment), log=True)
 		backup.save()
 		send_message(source, 'Saved backup "{}"'.format(comment), log=True)
-		for _ in map(server.execute, GL.Config.after_backup): pass
+		if GL.SERVER_INS.is_server_running:
+			for _ in map(server.execute, GL.Config.after_backup): pass
 		used_time = time.time() - start_time
-		broadcast_message('Backup finished, use {:.2f} sec'.format(used_time))
+		broadcast_message('Backup finished, use {0:.2f} sec, {1:}'.format(used_time,
+			format_size(get_total_size(os.path.join(GL.Config.backup_path, backup.id)))))
 		_flush_backup_timer()
 		if clean and mode == BackupMode.FULL and GL.Config.full_backup_limit > 0 and len(GL.Manager.index.fulln) > GL.Config.full_backup_limit:
 			broadcast_message('Backup out of range, automagically cleaning backups...')
-			next_job_call(clean_backup)
+			swap_job_call(clean_backup)
 
-	if len(GL.Config.start_backup_trigger_info) > 0:
+	if not GL.SERVER_INS.is_server_running:
+		c()
+	elif len(GL.Config.start_backup_trigger_info) > 0:
 		ping_job()
 		global game_saved_callback
 		game_saved_callback = new_thread(after_job_wrapper(c))
@@ -135,7 +147,7 @@ def restore_backup(source: MCDR.CommandSource, bid: str):
 	broadcast_message('Stopping the server')
 	server.stop()
 	server.wait_for_start()
-	make_backup(source, f'Server before restore({bid}) backup', mode=BackupMode.FULL, clean=False)
+	swap_job_call(make_backup, source, f'Server before restore({bid}) backup', mode=BackupMode.FULL, clean=False)
 	log_info('Restoring...')
 	bk.restore(server.get_mcdr_config()['working_directory'], GL.Config.backup_needs, GL.Config.backup_ignores)
 	log_info('Starting the server')

@@ -7,7 +7,7 @@ import mcdreforged.api.all as MCDR
 from . import globals as GL
 
 __all__ = [
-	'new_thread', 'get_current_job', '_clear_job', 'after_job_wrapper', 'ping_job', 'after_job', 'next_job_call', 'new_job', 'new_timer',
+	'new_thread', 'get_current_job', '_clear_job', 'after_job_wrapper', 'ping_job', 'after_job', 'swap_job_call', 'new_job', 'new_timer',
 	'new_command', 'join_rtext', 'send_block_message', 'send_message', 'broadcast_message', 'log_info',
 	'get_total_size', 'format_size'
 ]
@@ -69,19 +69,25 @@ def after_job_wrapper(call):
 			after_job()
 	return c
 
-def next_job_call(call, *args, **kwargs):
+def swap_job_call(call, *args, **kwargs):
 	global current_job, job_lock
+	last_job: list
 	with job_lock:
 		assert current_job is not None and current_job is not False
+		last_job = current_job
 		current_job = False
-	return call(*args, **kwargs)
+	try:
+		return call(*args, __smb_swap_call=True, **kwargs)
+	finally:
+		with job_lock:
+			current_job = last_job
 
 def new_job(job: str, block=False):
 	def w(call):
 		@functools.wraps(call)
-		def c(*args, **kwargs):
+		def c(*args, __smb_swap_call=False, **kwargs):
 			with job_lock:
-				if current_job is not None and current_job is not False and not block:
+				if current_job is not None and not __smb_swap_call and not block:
 					if len(args) > 0 and isinstance(args[0], MCDR.CommandSource):
 						send_message(args[0], MCDR.RText('In progress {} now'.format(current_job[0]), color=MCDR.RColor.red))
 					else:
@@ -144,8 +150,7 @@ def get_total_size(path: str):
 	size = 0
 	for root, _, files in os.walk(path):
 		for f in files:
-			f = os.path.join(root, f)
-			size += os.stat(f).st_size
+			size += os.stat(os.path.join(root, f)).st_size
 	return size
 
 __bt_units = ('B', 'KB', 'MB', 'GB', 'TB', 'PB')
