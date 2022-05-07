@@ -470,6 +470,7 @@ class BackupIndex:
 			json.dump({
 				'last': self._last,
 				'list': self._list,
+				'nodes': self._nodes,
 				'fulln': self._fulln,
 				'outdates': self._outdates
 			}, fd, separators=(',', ':'))
