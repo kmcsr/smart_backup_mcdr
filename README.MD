@@ -6,9 +6,9 @@
 
 ### Feture
 
-- Support *Full Backup* / *Incremental Backup* / *Differential Backup
+- Support *Full Backup* / *Incremental Backup* / *Differential Backup*
 - Support **timed backup**
-- Support **auto clean** out of ranged backups
+- Support **auto clean** outdated backups
 
 ### Notes
 
