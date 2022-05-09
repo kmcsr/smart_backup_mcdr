@@ -112,7 +112,7 @@ def make_backup(source: MCDR.CommandSource, comment: str, mode: BackupMode = Non
 		send_message(source, 'Saving backup "{}"'.format(comment), log=True)
 		backup.save()
 		send_message(source, 'Saved backup "{}"'.format(comment), log=True)
-		if GL.SERVER_INS.is_server_running:
+		if server.is_server_running():
 			for _ in map(server.execute, GL.Config.after_backup): pass
 		used_time = time.time() - start_time
 		broadcast_message('Backup finished, use {0:.2f} sec, {1:}'.format(used_time,
@@ -122,7 +122,7 @@ def make_backup(source: MCDR.CommandSource, comment: str, mode: BackupMode = Non
 			broadcast_message('Backup out of range, automagically cleaning backups...')
 			swap_job_call(clean_backup)
 
-	if not GL.SERVER_INS.is_server_running:
+	if not server.is_server_running():
 		c()
 	elif len(GL.Config.start_backup_trigger_info) > 0:
 		ping_job()

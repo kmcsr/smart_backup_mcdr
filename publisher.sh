@@ -5,7 +5,11 @@ RELEASE=true
 
 while [ -n "$1" ]; do
 	case $1 in
-		-n | --no-commit)
+		-d | --dry-run)
+			COMMIT=''
+			RELEASE=''
+			;;
+		-C | --no-commit)
 			COMMIT=''
 			;;
 		-R | --no-release)
@@ -34,12 +38,13 @@ if [ -n "$COMMIT" ]; then
 echo '==> Commiting git repo...'
 ( git add . && git commit -m "$version" && git push ) || exit $?
 
+fi
+
 if [ -n "$RELEASE" ]; then
 
 echo '==> Creating github release...'
 gh release create "$version" "./output/${name}.mcdr" -t "$version" -n '' || exit $?
 
-fi
 fi
 
 echo '==> Done'

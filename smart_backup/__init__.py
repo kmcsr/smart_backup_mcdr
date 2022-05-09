@@ -2,8 +2,8 @@
 import mcdreforged.api.all as MCDR
 from .utils import *
 from . import globals as GL
-from . import commands as CMD
 from . import api
+from . import commands as CMD
 
 def on_load(server: MCDR.PluginServerInterface, prev_module):
 	if prev_module is None:

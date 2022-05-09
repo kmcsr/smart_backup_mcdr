@@ -145,6 +145,7 @@ def destory():
 	global SERVER_INS, Manager
 	if Config is not None:
 		Config.save()
+		Config = None
 	Manager = None
 	for c in on_unload_callbacks:
 		c(SERVER_INS)
