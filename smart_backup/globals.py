@@ -9,7 +9,7 @@ import mcdreforged.api.all as MCDR
 from .objects import *
 
 __all__ = [
-	'MSG_ID', 'BIG_BLOCK_BEFOR', 'BIG_BLOCK_AFTER', 'SMBConfig', 'Config', 'SERVER_INS', 'init', 'destory'
+	'MSG_ID', 'BIG_BLOCK_BEFOR', 'BIG_BLOCK_AFTER', 'SMBConfig', 'Config', 'init', 'destory'
 ]
 
 MSG_ID = MCDR.RText('[SMB]', color=MCDR.RColor.green)
@@ -55,6 +55,10 @@ class SMBConfig(MCDR.Serializable):
 		'save':     3,
 	}
 
+	def __init__(self):
+		super().__init__()
+		self._server = None
+
 	def test_backup_trigger(self, info: str):
 		if not hasattr(self, '__start_backup_trigger') or self.__start_backup_trigger_info != self.start_backup_trigger_info:
 			self.__start_backup_trigger_info = self.start_backup_trigger_info
@@ -65,6 +69,10 @@ class SMBConfig(MCDR.Serializable):
 		lvl = self.minimum_permission_level.get(literal, 4)
 		return MCDR.Literal(literal).requires(lambda src: src.has_permission(lvl),
 			lambda: MCDR.RTextList(MSG_ID, MCDR.RText(' permission denied', color=MCDR.RColor.red)))
+
+	@property
+	def server(self):
+		return self._server
 
 	@property
 	def cache(self):
@@ -88,11 +96,15 @@ class SMBConfig(MCDR.Serializable):
 		pass # TODO
 
 	@classmethod
-	def load(cls, source: MCDR.CommandSource = None):
+	def load(cls, source: MCDR.CommandSource, server: MCDR.PluginServerInterface = None):
 		global Config, Manager
 		cache: dict = {}
 		oldConfig: SMBConfig = Config
-		Config = SERVER_INS.load_config_simple(target_class=cls, source_to_reply=source)
+		if server is None:
+			assert oldConfig != None
+			server = oldConfig._server
+		Config = server.load_config_simple(target_class=cls, source_to_reply=source)
+		Config._server = server
 		Config._fix()
 
 		cf: str = os.path.join(Config.backup_path, 'cache.json')
@@ -106,18 +118,18 @@ class SMBConfig(MCDR.Serializable):
 		if oldConfig is None or oldConfig.backup_path != Config.backup_path:
 			Manager = BackupManager(Config.backup_path)
 
-	def save(self):
-		SERVER_INS.save_config_simple(self)
+	def save(self, source: MCDR.CommandSource):
+		self._server.save_config_simple(self)
 		Manager.savecfg()
 		if not os.path.exists(self.backup_path):
 			os.makedirs(self.backup_path)
 		with open(os.path.join(self.backup_path, 'cache.json'), 'w') as fd:
 			json.dump(self._cache, fd, indent=4, separators=(', ', ': '), sort_keys=True)
+		source.reply('Config file save SUCCESS')
 
 
 Config: SMBConfig = None
 Manager: BackupManager = None
-SERVER_INS: MCDR.PluginServerInterface = None
 
 on_load_callbacks = []
 on_unload_callbacks = []
@@ -131,22 +143,17 @@ def on_unload_call(call):
 	return call
 
 def init(server: MCDR.PluginServerInterface):
-	global SERVER_INS
-	SERVER_INS = server
 	global BIG_BLOCK_BEFOR, BIG_BLOCK_AFTER
 	metadata = server.get_self_metadata()
 	BIG_BLOCK_BEFOR = BIG_BLOCK_BEFOR.format(metadata.name, metadata.version)
 	BIG_BLOCK_AFTER = BIG_BLOCK_AFTER.format(metadata.name, metadata.version)
-	SMBConfig.load()
+	SMBConfig.load(server.get_plugin_command_source(), server)
 	for c in on_load_callbacks:
 		c(server)
 
-def destory():
-	global SERVER_INS, Manager
+def destory(server: MCDR.PluginServerInterface):
+	global Manager
 	if Config is not None:
-		Config.save()
+		Config.save(server.get_plugin_command_source())
 		Config = None
 	Manager = None
-	for c in on_unload_callbacks:
-		c(SERVER_INS)
-	SERVER_INS = None

@@ -4,7 +4,7 @@
 
 # Smart Backup
 
-### Feture
+### Feature
 
 - Support *Full Backup* / *Incremental Backup* / *Differential Backup*
 - Support **timed backup**

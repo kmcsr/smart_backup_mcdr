@@ -10,22 +10,12 @@ from . import api
 
 Prefix = '!!smb'
 
-HelpMessage = '''
-{0} help :Show this help message
-{0} status :Show the plugin status
-{0} list [<limit> = 10] :List up to <limit> backups
-{0} query <id> :Query full information of backup
-{0} make [<comment> = 'None'] :Create new backup
-{0} makefull [<comment> = 'None'] :Create new full backup
-{0} remove <id> [<force> = false] :Remove backup
-{0} restore <id> [<force> = false] :Restore backup
-{0} confirm :Confirm operation
-{0} abort :Cancel operation
-{0} reload :Reload config file
-{0} save :Save config file
-'''.strip().format(Prefix)
+HelpMessage: str = None
 
 def register(server: MCDR.PluginServerInterface):
+	global HelpMessage
+	HelpMessage = tr('help_msg', Prefix)
+
 	server.register_command(
 		MCDR.Literal(Prefix).
 		runs(command_help).
@@ -61,8 +51,8 @@ def command_help(source: MCDR.CommandSource):
 def command_status(source: MCDR.CommandSource):
 	lb = GL.Manager.get_last()
 	lc = 'None' if lb is None else new_command(
-		'{0} restore {1}'.format(Prefix, lb.id),
-		'{0}: {1}({2})'.format(lb.id, lb.strftime, lb.comment))
+		f'{Prefix} restore {lb.id}',
+		f'{lb.id}: {lb.strftime}({lb.comment})')
 	bs = 0
 	if os.path.exists(GL.Config.backup_path):
 		bs = get_total_size(GL.Config.backup_path)
@@ -81,12 +71,12 @@ def command_list_backup(source: MCDR.CommandSource, limit: int):
 	send_message(source, 'Last backups (up to {} lines):'.format(limit))
 	for b in bks:
 		send_message(source, MCDR.RTextList(b.z_index * '|',
-			new_command('{0} restore {1}'.format(Prefix, b.id), b.id).h(join_rtext(
-				'ID: ' + b.id,
-				'Comment: ' + b.comment,
-				'Date: ' + b.strftime,
-				'Size: ' + format_size(get_total_size(os.path.join(GL.Config.backup_path, b.id))),
-				sep='\n')),
+			new_command(f'{Prefix} restore {b.id}', b.id).h(tr('query.status',
+				id=b.id,
+				comment=b.comment,
+				date=b.strftime,
+				size=format_size(get_total_size(os.path.join(GL.Config.backup_path, b.id)))
+			)),
 			': ' + b.comment))
 	send_message(source, GL.BIG_BLOCK_AFTER)
 
@@ -97,15 +87,18 @@ def command_query_backup(source: MCDR.CommandSource, bid: str):
 	try:
 		bk = GL.Manager.load(bid)
 	except BackupNotFoundError:
-		send_message(source, MCDR.RText('Cannot find backup with id "{}"'.format(bid)))
+		send_message(source, MCDR.RText(tr('error.not_found', bid), color=MCDR.RColor.red))
 		return
-	send_block_message(source,
-		'ID: ' + bk.id,
-		'Comment: ' + bk.comment,
-		'Date: ' + bk.strftime,
-		'Size: ' + format_size(get_total_size(os.path.join(GL.Config.backup_path, bid))),
+	send_block_message(source, tr('query.status',
+			id=bk.id,
+			comment=bk.comment,
+			date=bk.strftime,
+			size=format_size(get_total_size(os.path.join(GL.Config.backup_path, bk.id)))
+		),
 		join_rtext(
-			new_command('{0} restore {1}'.format(Prefix, bk.id), '[RESTORE]')
+			new_command(f'{Prefix} restore {bk.id}', f'[{tr("restore.word")}]'),
+			new_command(f'{Prefix} remove {bk.id}', f'[{tr("remove.word")}]'),
+			sep=' | '
 		)
 	)
 
@@ -129,7 +122,7 @@ def command_restore(source: MCDR.CommandSource, bid: str, force: bool = False):
 	try:
 		bk = GL.Manager.load(bid)
 	except BackupNotFoundError:
-		send_message(source, MCDR.RText('Cannot find backup with id "{}"'.format(bid)))
+		send_message(source, MCDR.RText(tr('error.not_found', bid), color=MCDR.RColor.red))
 		return
 	server = source.get_server()
 
@@ -141,14 +134,13 @@ def command_restore(source: MCDR.CommandSource, bid: str, force: bool = False):
 		def ab():
 			nonlocal abort
 			abort = True
-		date = bk.strftime
 		register_confirm(None, lambda:0, ab)
 		while timeout > 0:
-			broadcast_message('Server will restart and recovery to {date}({comment}) after {t} sec, run'.format(t=timeout, date=date, comment=bk.comment),
-				new_command('{} abort'.format(Prefix)), 'to cancel restore')
+			broadcast_message(tr('restore.restart_note', t=timeout, date=bk.strftime, comment=bk.comment) + ',',
+				tr('word.run'), new_command(f'{Prefix} abort'), tr('word.to_cancel'))
 			time.sleep(1)
 			if abort:
-				broadcast_message('Canceled restore')
+				broadcast_message(tr('restore.canceled'))
 				return
 			timeout -= 1
 		confirm_map.pop(None, None)
@@ -157,14 +149,16 @@ def command_restore(source: MCDR.CommandSource, bid: str, force: bool = False):
 	ping_job()
 	register_confirm(source.player if source.is_player else '',
 		pre_restore,
-		after_job_wrapper(lambda: send_message(source, 'Canceled restore')), timeout=15)
-	send_message(source, MCDR.RText('Are you sure recovery to "{}"?'.format(bk.comment)).
-		h('id: ' + bk.id,
-			'comment: ' + bk.comment,
-			'date: ' + bk.strftime,
-			'size: ' + format_size(get_total_size(os.path.join(GL.Config.backup_path, bid)))))
-	send_message(source, 'Run', new_command('{} confirm'.format(Prefix)), 'to confirm, Run',
-		new_command('{} abort'.format(Prefix)), 'to cancel')
+		after_job_wrapper(lambda: send_message(source, tr('restore.canceled'))), timeout=15)
+	send_message(source, tr(date=bk.strftime, comment=bk.comment).
+		h(tr('query.status',
+			id=bk.id,
+			comment=bk.comment,
+			date=bk.strftime,
+			size=format_size(get_total_size(os.path.join(GL.Config.backup_path, bk.id)))
+		)))
+	send_message(source, tr('word.run'), new_command(f'{Prefix} confirm'), tr('to_confirm') + ',',
+		tr('word.run'), new_command(f'{Prefix} abort'), tr('word.to_cancel'))
 
 @new_thread
 @new_job('remove')
@@ -178,7 +172,7 @@ def command_remove(source: MCDR.CommandSource, bid: str, force: bool = False):
 	try:
 		bk = GL.Manager.load(bid)
 	except BackupNotFoundError:
-		send_message(source, MCDR.RText('Cannot find backup with id "{}"'.format(bid)))
+		send_message(source, MCDR.RText(tr('error.not_found', bid), color=MCDR.RColor.red))
 		return
 	server = source.get_server()
 
@@ -186,21 +180,23 @@ def command_remove(source: MCDR.CommandSource, bid: str, force: bool = False):
 	register_confirm(source.player if source.is_player else '',
 		after_job_wrapper(lambda: swap_job_call(api.remove_backup, source, bid)),
 		after_job_wrapper(lambda: send_message(source, 'Canceled removing')), timeout=15)
-	send_message(source, MCDR.RText('Are you sure to remove "{}" and child backup for it?'.format(bk.comment)).
-		h('id: ' + bk.id,
-			'comment: ' + bk.comment,
-			'date: ' + bk.strftime,
-			'size: ' + format_size(get_total_size(os.path.join(GL.Config.backup_path, bid)))))
-	send_message(source, 'Run', new_command('{} confirm'.format(Prefix)), 'to confirm, Run',
-		new_command('{} abort'.format(Prefix)), 'to cancel')
+	send_message(source, tr('remove.ask', date=bk.strftime, comment=bk.comment).
+		h(tr('query.status',
+			id=bk.id,
+			comment=bk.comment,
+			date=bk.strftime,
+			size=format_size(get_total_size(os.path.join(GL.Config.backup_path, bk.id)))
+		)))
+	send_message(source, tr('word.run'), new_command(f'{Prefix} confirm'), tr('to_confirm') + ',',
+		tr('word.run'), new_command(f'{Prefix} abort'), tr('word.to_cancel'))
 
 def command_confirm(source: MCDR.CommandSource):
-	confirm_map.pop(source.player if source.is_player else '', (lambda s: send_message(s, 'There are no any action in progess'), 0))[0](source)
+	confirm_map.pop(source.player if source.is_player else '', (lambda s: send_message(s, tr('word.no_action')), 0))[0](source)
 
 def command_abort(source: MCDR.CommandSource):
 	c = confirm_map.pop(source.player if source.is_player else '', (0, 0))[1]
 	if not c:
-		c = confirm_map.pop(None, (0, lambda s: send_message(s, 'There are no any action in progess')))[1]
+		c = confirm_map.pop(None, (0, lambda s: send_message(s, tr('word.no_action'))))[1]
 	c(source)
 
 @new_thread
@@ -209,8 +205,7 @@ def command_config_load(source: MCDR.CommandSource):
 
 @new_thread
 def command_config_save(source: MCDR.CommandSource):
-	GL.Config.save()
-	send_message(source, 'Save config file SUCCESS')
+	GL.Config.save(source)
 
 confirm_map = {}
 

@@ -1,6 +1,6 @@
 {
   "id": "smart_backup",
-  "version": "1.4.1",
+  "version": "1.4.2",
   "name": "SmartBackup",
   "description": {
     "en_us": "A Minecraft Backup Plugin",
@@ -10,5 +10,9 @@
   "link": "https://github.com/kmcsr/smart_backup_mcdr",
   "dependencies": {
     "mcdreforged": ">=2.0.0"
-  }
+  },
+  "resources": [
+    "LICENSE",
+    "lang"
+  ]
 }

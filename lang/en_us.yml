@@ -1,0 +1,44 @@
+smart_backup:
+  help_msg: |-
+    {0} help :Show this help message
+    {0} status :Show the plugin status
+    {0} list [<limit> = 10] :List up to <limit> backups
+    {0} query <id> :Query full information of backup
+    {0} make [<comment> = 'None'] :Create new backup
+    {0} makefull [<comment> = 'None'] :Create new full backup
+    {0} remove <id> [<force> = false] :Remove backup
+    {0} restore <id> [<force> = false] :Restore backup
+    {0} confirm :Confirm operation
+    {0} abort :Cancel operation
+    {0} reload :Reload config file
+    {0} save :Save config file
+  error:
+    not_found: Cannot find backup with id {0}
+  query:
+    status: |-
+      ID: {id}
+      Commend: {comment}
+      Date: {date}
+      Size: {size}
+  make:
+    making: Making backup {comment}
+    saving: Saving backup {date}({comment})
+    saved: Saved backup {date}({comment})
+    finish: Backup finished, use {0:.2f} sec, {1:}
+  clean:
+    auto: Backup out of limit, automagically cleaning backups.
+    outdated: Outdated backup {id}:{comment}({date})
+    finish: Backup cleaned up, use {t:.2f} sec, free up disk {free}
+  restore:
+    word: RESTORE
+    ask: Are you sure recovery to {date}({comment})?
+    canceled: Canceled restore
+    restart_note: Server will restart and recovery to {date}({comment}) after {t} sec
+  remove:
+    word: REMOVE
+    ask: Are you sure to remove {date}({comment}) and child backup for it?
+  word:
+    run: run
+    to_confirm: to confirm
+    to_cancel: to cancel
+    no_action: There are no any action in progess

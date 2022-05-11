@@ -1,0 +1,44 @@
+smart_backup:
+  help_msg: |-
+    {0} help :显示这条帮助信息
+    {0} status :显示插件当前状态
+    {0} list [<limit> = 10] :列出<limit>条备份
+    {0} query <id> :查询备份<id>信息
+    {0} make [<comment> = 'None'] :创建新的备份
+    {0} makefull [<comment> = 'None'] :创建新的全盘备份
+    {0} remove <id> [<force> = false] :删除备份<id>
+    {0} restore <id> [<force> = false] :恢复备份<id>
+    {0} confirm :同意操作
+    {0} abort :取消操作
+    {0} reload :重载配置文件
+    {0} save :保存配置文件
+  error:
+    not_found: 找不到id为{0}的备份
+  query:
+    status: |-
+      标识: {id}
+      描述: {comment}
+      日期: {date}
+      大小: {size}
+  make:
+    making: 创建备份 {comment} 中.
+    saving: 保存备份 {date}({comment}) 中.
+    saved: 备份 {date}({comment}) 已保存
+    finish: 备份完成, 用时 {t:.2f} 秒, 占用 {use:}
+  clean:
+    auto: 备份数量超出限制, 自动清理备份中.
+    outdated: 过时的备份 {id}:{comment}({date})
+    finish: 备份清理完成, 用时 {t:.2f} 秒, 释放磁盘空间 {free}
+  restore:
+    word: 恢复
+    ask: 确定恢复备份 {date}({comment}) 吗?
+    canceled: 取消回档
+    restart_note: 服务器将在{t}秒后重启并恢复到 {date}({comment})
+  remove:
+    word: 删除
+    ask: 确定移除 {date}({comment}) 及其子备份吗?
+  word:
+    run: 运行
+    to_confirm: 以确认
+    to_cancel: 以取消
+    no_action: 当前没有任何进行中的操作

@@ -7,7 +7,8 @@ import mcdreforged.api.all as MCDR
 from . import globals as GL
 
 __all__ = [
-	'new_thread', 'get_current_job', '_clear_job', 'after_job_wrapper', 'ping_job', 'after_job', 'swap_job_call', 'new_job', 'new_timer',
+	'new_thread', 'tr',
+	'get_current_job', '_clear_job', 'after_job_wrapper', 'ping_job', 'after_job', 'swap_job_call', 'new_job', 'new_timer',
 	'new_command', 'join_rtext', 'send_block_message', 'send_message', 'broadcast_message', 'log_info',
 	'get_total_size', 'format_size'
 ]
@@ -18,6 +19,9 @@ def new_thread(call):
 	def c(*args, **kwargs):
 		return call(*args, **kwargs)
 	return c
+
+def tr(key: str, *args, **kwargs):
+	return MCDR.ServerInterface.get_instance().rtr(f'smart_backup.{key}', *args, **kwargs)
 
 current_job = None
 job_lock = Condition(RLock())
@@ -139,12 +143,10 @@ def send_message(source: MCDR.CommandSource, *args, sep=' ', prefix=GL.MSG_ID, l
 			source.get_server().logger.info(t)
 
 def broadcast_message(*args, sep=' ', prefix=GL.MSG_ID):
-	if GL.SERVER_INS is not None:
-		GL.SERVER_INS.broadcast(join_rtext(prefix, *args, sep=sep))
+	MCDR.ServerInterface.get_instance().broadcast(join_rtext(prefix, *args, sep=sep))
 
 def log_info(*args, sep=' ', prefix=GL.MSG_ID):
-	if GL.SERVER_INS is not None:
-		GL.SERVER_INS.logger.info(join_rtext(prefix, *args, sep=sep))
+	MCDR.ServerInterface.get_instance().logger.info(join_rtext(prefix, *args, sep=sep))
 
 def get_total_size(path: str):
 	size = 0

@@ -5,7 +5,7 @@ RELEASE=true
 
 while [ -n "$1" ]; do
 	case $1 in
-		-d | --dry-run)
+		-p | --packet-only)
 			COMMIT=''
 			RELEASE=''
 			;;
